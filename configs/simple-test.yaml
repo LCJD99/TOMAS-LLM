@@ -102,6 +102,36 @@ model:
       activation: "relu"
 
 # ============================================================
+# Output Heads (Section 4.x - Right Panel)
+# ============================================================
+output_heads:
+  # TokenTypeGate
+  token_gate:
+    vocab_size: 151936      # Qwen2.5 vocab size
+    use_learned_gate: false # Use rule-based routing (simple and fast)
+  
+  # ToolClassifier (Path B)
+  tool_classifier:
+    num_tools: 10           # Number of tools in registry (test: 10)
+    tool_dim: 1024          # Tool embedding dimension
+    use_attention: true     # Use multi-head attention pooling
+    dropout: 0.1
+  
+  # ResourceRegressor (Path B)
+  resource_regressor:
+    temporal_dim: 256       # From Section 2.4 TemporalEncoder
+    dropout: 0.1
+    use_constraint: true    # Enforce resource constraints
+    use_normalization: false # No normalization for test
+    
+    # Resource limits (for clamping)
+    default_max_resources:
+      cpu_core: 32.0
+      cpu_mem_gb: 128.0
+      gpu_sm: 80.0
+      gpu_mem_gb: 40.0
+
+# ============================================================
 # 训练配置 (简化用于测试)
 # ============================================================
 training:
