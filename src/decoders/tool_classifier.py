@@ -191,7 +191,7 @@ class ToolClassifier(nn.Module):
         self,
         hidden_states: torch.Tensor,
         tool_embeddings: torch.Tensor,
-        temporal_emb: Optional[torch.Tensor] = None,
+        temporal_emb: Optional[torch.Tensor] = None,  # Kept for backward compatibility, not used
         tool_mask: Optional[torch.Tensor] = None,
         return_probs: bool = False,
     ) -> Dict[str, torch.Tensor]:
@@ -201,7 +201,7 @@ class ToolClassifier(nn.Module):
         Args:
             hidden_states: (batch, hidden_dim)
             tool_embeddings: (num_tools, tool_dim)
-            temporal_emb: (temporal_dim,) [optional]
+            temporal_emb: (temporal_dim,) [optional, for backward compatibility, not used]
             tool_mask: (num_tools,) [optional]
             return_probs: Whether to return full probability distribution
         
@@ -211,7 +211,8 @@ class ToolClassifier(nn.Module):
                 - 'confidence': (batch,) - Confidence scores (max probability)
                 - 'probs': (batch, num_tools) - Full probability distribution [if return_probs=True]
         """
-        logits = self.forward(hidden_states, tool_embeddings, temporal_emb, tool_mask)
+        # Note: temporal_emb is ignored (kept for backward compatibility)
+        logits = self.forward(hidden_states, tool_embeddings, tool_mask)
         probs = torch.softmax(logits, dim=-1)  # (batch, num_tools)
         
         confidence, tool_id = probs.max(dim=-1)  # (batch,)
