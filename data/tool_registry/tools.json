@@ -1,0 +1,34 @@
+[
+  {
+    "name": "image_classification",
+    "desc": "Classify images into predefined categories using a deep learning model. Suitable for object recognition, scene understanding, and content moderation tasks."
+  },
+  {
+    "name": "text_summarization",
+    "desc": "Generate concise summaries of long text documents while preserving key information. Useful for document processing and information extraction."
+  },
+  {
+    "name": "video_transcoding",
+    "desc": "Convert video files between different formats and resolutions. Supports H.264, H.265, VP9 codecs with configurable bitrate and quality settings."
+  },
+  {
+    "name": "sentiment_analysis",
+    "desc": "Analyze the emotional tone and sentiment polarity of text. Returns positive, negative, or neutral sentiment scores."
+  },
+  {
+    "name": "object_detection",
+    "desc": "Detect and localize multiple objects in images with bounding boxes. Supports real-time detection of common objects, people, and vehicles."
+  },
+  {
+    "name": "machine_translation",
+    "desc": "Translate text between different languages using neural machine translation models. Supports 50+ language pairs."
+  },
+  {
+    "name": "speech_recognition",
+    "desc": "Convert spoken audio to text with high accuracy. Supports multiple languages and acoustic environments."
+  },
+  {
+    "name": "data_preprocessing",
+    "desc": "Clean, normalize, and transform raw data for machine learning pipelines. Includes feature scaling, encoding, and missing value handling."
+  }
+]

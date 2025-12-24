@@ -1,0 +1,213 @@
+# TOMAS-LLM Simple Test Configuration (使用 Qwen2.5-0.5B 进行快速测试)
+
+# ============================================================
+# 数据路径配置
+# ============================================================
+data:
+  tool_registry_path: "data/tool_registry/tools.json"
+  profiling_path: "data/profiling/profiling.csv"
+  
+# ============================================================
+# LLM 配置 (Qwen2.5-0.5B for testing)
+# ============================================================
+llm:
+  model:
+    name: "Qwen/Qwen2.5-0.5B-Instruct"  # 小模型，适合快速测试
+    device: "cpu"  # 测试时使用CPU
+    dtype: "float32"  # 使用float32以确保兼容性
+    use_flash_attn: false  # 小模型不需要flash attention
+    trust_remote_code: true
+    load_in_8bit: false
+    load_in_4bit: false
+  
+  # Context Projector (投影context到LLM维度)
+  context_projector:
+    llm_hidden_dim: 896  # Qwen2.5-0.5B hidden dimension
+    temporal_dim: 256    # v_temporal from Section 2.4
+    task_dim: 896        # Task embedding from Section 2.1
+    tool_dim: 1024       # Tool encoding from Section 1.5
+    num_temporal_tokens: 1  # Number of temporal prefix tokens
+    num_task_tokens: 1      # Number of task prefix tokens
+    dropout: 0.1
+  
+  # Generation settings
+  generation:
+    max_new_tokens: 512
+    temperature: 0.7
+    top_p: 0.9
+    do_sample: true
+
+# ============================================================
+# 模型配置 (Legacy - kept for backward compatibility)
+# ============================================================
+model:
+  # LLM Backbone (使用0.5B小模型进行测试)
+  backbone:
+    name: "Qwen/Qwen2.5-0.5B"  # 小模型，适合快速测试
+    device: "cpu"  # 测试时使用CPU（也可改为cuda）
+    dtype: "float32"  # 使用float32以确保兼容性
+    use_flash_attention: false  # 小模型不需要flash attention
+  
+  # User Task Encoder (用户任务描述编码)
+  task_encoder:
+    max_length: 512  # 任务描述最大token长度
+    use_pretrained_embeddings: true  # 使用预训练embedding（与LLM共享）
+    pooling_method: "mean"  # 池化方法: mean, max, cls, last
+  
+  # Tool Encoder (Stream A) 维度配置
+  tool_encoder:
+    d_tool: 768  # 工具语义向量维度
+    max_desc_length: 256  # 工具描述最大token长度
+  
+  # Resource MLP (Stream B) 维度配置
+  resource_mlp:
+    d_resource: 256  # 资源画像投影维度
+    hidden_dim: 512  # MLP隐藏层维度
+    input_features: 6  # [input_size, cpu_core, cpu_mem_gb, gpu_sm, gpu_mem_gb, latency_ms]
+    dropout: 0.0  # Dropout probability (0.0 = no dropout)
+    use_batch_norm: false  # Whether to use batch normalization
+  
+  # Multi-head Self-Attention (工具集合融合)
+  tool_attention:
+    num_heads: 8
+    num_layers: 1
+    dropout: 0.1
+  
+  # Temporal Encoder (1D-CNN)
+  temporal_encoder:
+    in_channels: 4  # [cpu_free_cores, gpu_free_sm_ratio, gpu_free_mem_gb, latency_window]
+    out_channels: 128
+    kernel_sizes: [3, 5, 7]  # 多尺度卷积核
+    d_temporal: 256  # 时序特征向量维度
+  
+  # Latency Prediction Module
+  latency_predictor:
+    enabled: false  # Naive模式：使用固定值
+    mode: "fixed"  # "fixed", "rule_based", "learned"
+    fixed_t_inf_ms: 500  # 固定推理延迟（毫秒）
+    enable_learning: false  # 是否启用学习型预测器
+    hidden_dim: 128  # 学习型预测器隐藏层维度
+    use_in_planning: true  # 是否在规划中考虑延迟
+  
+  # Output Heads
+  output_heads:
+    # Tool Classifier
+    tool_classifier:
+      hidden_dim: 512
+    
+    # Resource Regressor
+    resource_regressor:
+      hidden_dim: 512
+      output_features: 4  # [cpu_core, cpu_mem_gb, gpu_sm, gpu_mem_gb]
+      activation: "relu"
+
+# ============================================================
+# 训练配置 (简化用于测试)
+# ============================================================
+training:
+  batch_size: 2  # 小batch size用于测试
+  num_epochs: 3  # 少量epoch用于快速测试
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 10  # 减少warmup步数
+  gradient_accumulation_steps: 2  # 减少累积步数
+  max_grad_norm: 1.0
+  
+  # 训练策略
+  strategy: "freeze_backbone"  # "freeze_backbone", "lora", "full_finetune"
+  
+  # LoRA 配置（如果使用）
+  lora:
+    r: 8  # 减小rank以加速
+    lora_alpha: 16
+    lora_dropout: 0.05
+    target_modules: ["q_proj", "v_proj"]
+  
+  # 损失函数权重
+  loss_weights:
+    tool_classification: 1.0
+    resource_regression: 1.0
+    feasibility_penalty: 0.5  # 超配惩罚
+  
+  # Checkpoint
+  checkpoint_dir: "checkpoints/simple_test"
+  save_steps: 100  # 更频繁保存用于测试
+  eval_steps: 50  # 更频繁评估
+
+# ============================================================
+# 推理配置
+# ============================================================
+inference:
+  max_new_tokens: 256  # 减少生成长度用于测试
+  temperature: 0.7
+  top_p: 0.9
+  do_sample: true
+  
+  # 资源约束裁剪
+  resource_clipping:
+    enabled: true
+    max_cpu_cores: 32
+    max_cpu_mem_gb: 128
+    max_gpu_sm: 100  # 百分比
+    max_gpu_mem_gb: 80
+
+# ============================================================
+# Runtime 配置
+# ============================================================
+runtime:
+  # 系统资源快照
+  timeline:
+    csv_path: "input/system_profiling.csv"  # 系统资源时间线CSV
+    interpolation: "linear"  # 插值方法: linear, nearest, previous
+    prediction_window_sec: 60  # 预测未来60秒的资源曲线
+    time_granularity_ms: 100  # 时间粒度100ms
+  
+  # 1D-CNN Temporal Encoder (Section 2.4)
+  temporal_encoder:
+    enabled: true
+    normalization: "minmax"  # 归一化方法: minmax, standard, none
+    hidden_channels: 64      # CNN隐藏层通道数
+    output_dim: 256          # v_temporal输出维度
+    num_layers: 3            # CNN层数
+    pooling: "adaptive_avg"  # 池化方法: adaptive_avg, adaptive_max, flatten
+    min_timesteps: 5         # 最小时间步数
+    max_timesteps: 50        # 最大时间步数
+    time_granularity_ms: 100 # 时间步粒度(ms)
+    
+  # Naive 固定曲线模拟（最小原型）
+  naive_mode:
+    enabled: true
+    fixed_cpu_free_cores: [16, 16, 14, 14, 12, 12, 10, 10]  # 模拟CPU资源变化
+    fixed_cpu_mem_gb: [64, 64, 62, 62, 60, 60, 58, 58]  # CPU内存变化
+    fixed_gpu_free_sm_ratio: [0.8, 0.8, 0.75, 0.75, 0.7, 0.7, 0.65, 0.65]  # GPU SM变化
+    fixed_gpu_free_mem_gb: [40, 40, 38, 38, 36, 36, 34, 34]  # GPU内存变化
+
+# ============================================================
+# 评估配置
+# ============================================================
+evaluation:
+  metrics:
+    - "tool_accuracy"
+    - "resource_mae"
+    - "resource_mape"
+    - "feasibility_rate"
+    - "plan_parse_success_rate"
+  
+  test_data_path: "data/test_samples.json"
+
+# ============================================================
+# 日志配置
+# ============================================================
+logging:
+  level: "DEBUG"  # 测试时使用DEBUG级别
+  log_dir: "logs/simple_test"
+  log_to_file: true
+
+# ============================================================
+# 特殊 Token 定义
+# ============================================================
+special_tokens:
+  tool_plan_start: "<TOOL_PLAN>"
+  tool_id: "<TOOL_ID>"
+  resource_cfg: "<RESOURCE_CFG>"
+  tool_plan_end: "</TOOL_PLAN>"
