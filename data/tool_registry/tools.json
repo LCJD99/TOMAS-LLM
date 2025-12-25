@@ -8,12 +8,8 @@
     "desc": "Generate concise summaries of long text documents while preserving key information. Useful for document processing and information extraction."
   },
   {
-    "name": "video_transcoding",
-    "desc": "Convert video files between different formats and resolutions. Supports H.264, H.265, VP9 codecs with configurable bitrate and quality settings."
-  },
-  {
-    "name": "sentiment_analysis",
-    "desc": "Analyze the emotional tone and sentiment polarity of text. Returns positive, negative, or neutral sentiment scores."
+    "name": "image_captioning",
+    "desc": "Generate descriptive captions for images using a combination of computer vision and natural language processing techniques."
   },
   {
     "name": "object_detection",
@@ -24,11 +20,11 @@
     "desc": "Translate text between different languages using neural machine translation models. Supports 50+ language pairs."
   },
   {
-    "name": "speech_recognition",
-    "desc": "Convert spoken audio to text with high accuracy. Supports multiple languages and acoustic environments."
+    "name": "super_resolution",
+    "desc": "Enhance the resolution of low-quality images using deep learning techniques. Ideal for improving image clarity in photography and surveillance."
   },
   {
-    "name": "data_preprocessing",
-    "desc": "Clean, normalize, and transform raw data for machine learning pipelines. Includes feature scaling, encoding, and missing value handling."
+    "name": "visual_question_answering",
+    "desc": "Answer questions about the content of images by combining visual and textual information."
   }
 ]

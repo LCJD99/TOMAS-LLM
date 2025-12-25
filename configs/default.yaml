@@ -75,7 +75,7 @@ model:
   
   # Temporal Encoder (1D-CNN)
   temporal_encoder:
-    in_channels: 4  # [cpu_free_cores, gpu_free_sm_ratio, gpu_free_mem_gb, latency_window]
+    in_channels: 4  # [cpu_free_cores, cpu_free_memory, gpu_free_sm_ratio, gpu_free_mem_gb]
     out_channels: 128
     kernel_sizes: [3, 5, 7]  # 多尺度卷积核
     d_temporal: 256  # 时序特征向量维度
