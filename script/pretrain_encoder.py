@@ -397,6 +397,19 @@ def main():
     logging_cfg = config['logging']
     device_cfg = config['device']
     
+    # Determine model path (support local models)
+    if model_cfg.get('local_model_path'):
+        # Explicit local path takes precedence
+        model_path = model_cfg['local_model_path']
+        print(f"Using explicit local model path: {model_path}")
+    elif model_cfg.get('use_local_model', False):
+        # llm_model is treated as local path
+        model_path = model_cfg['llm_model']
+        print(f"Using local model: {model_path}")
+    else:
+        # Default: HuggingFace model ID
+        model_path = model_cfg['llm_model']
+    
     # Create output directory
     os.makedirs(output_cfg['output_dir'], exist_ok=True)
     
@@ -418,7 +431,7 @@ def main():
     dataset = EncoderPretrainDataset(
         tool_registry_path=data_cfg['tool_registry'],
         profiling_data_path=data_cfg['profiling_data'],
-        tokenizer_name=model_cfg['llm_model'],
+        tokenizer_name=model_path,
         augmentation_mode=data_cfg['augmentation']['mode'],
         num_augmented_copies=data_cfg['augmentation']['num_copies'],
         use_variation=data_cfg['augmentation']['use_variation'],
@@ -441,14 +454,14 @@ def main():
     # 2. Initialize encoder
     print("\n[2/5] Initializing encoder...")
     encoder = ResourceEncoderForPretraining(
-        llm_model_name=model_cfg['llm_model'],
+        llm_model_name=model_path,
         llm_hidden_dim=model_cfg['llm_hidden_dim'],
         d_resource=model_cfg['d_resource'],
         num_attention_heads=model_cfg['num_attention_heads'],
         dropout=model_cfg['dropout'],
         num_tools=model_cfg['num_tools'],
         freeze_semantic=model_cfg['freeze_semantic'],
-        cache_dir=model_cfg['cache_dir']
+        cache_dir=model_cfg.get('cache_dir', 'hub')
     )
     
     trainable_params = sum(p.numel() for p in encoder.get_trainable_parameters())
@@ -458,14 +471,23 @@ def main():
     
     # 3. Load LLM (frozen)
     print("\n[3/5] Loading LLM backbone...")
+    
+    # Determine load kwargs based on whether using local model
+    import os
+    is_local = os.path.isdir(model_path)
+    llm_load_kwargs = {
+        "trust_remote_code": True,
+        "torch_dtype": torch.float32  # Use FP32 for training
+    }
+    if not is_local:
+        llm_load_kwargs["cache_dir"] = model_cfg.get('cache_dir', 'hub')
+    
     llm_model = AutoModelForCausalLM.from_pretrained(
-        model_cfg['llm_model'],
-        trust_remote_code=True,
-        cache_dir=model_cfg['cache_dir'],
-        torch_dtype=torch.float32  # Use FP32 for training
+        model_path,
+        **llm_load_kwargs
     )
     tokenizer = dataset.tokenizer
-    print(f"  ✓ LLM loaded: {model_cfg['llm_model']}")
+    print(f"  ✓ LLM loaded: {model_path}")
     
     # 4. Setup optimizer and scheduler
     print("\n[4/5] Setting up optimizer...")
