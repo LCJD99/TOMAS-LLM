@@ -15,7 +15,7 @@ import pandas as pd
 import torch
 from pydantic import ValidationError
 
-from schemas.tool_schema import ToolSchema, ProfilingSchema
+from src.schemas.tool_schema import ToolSchema, ProfilingSchema
 
 
 logger = logging.getLogger(__name__)
