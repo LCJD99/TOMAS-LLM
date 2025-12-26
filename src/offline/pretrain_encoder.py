@@ -56,11 +56,20 @@ class ResourceEncoderForPretraining(nn.Module):
         self.d_resource = d_resource
         self.freeze_semantic = freeze_semantic
         
+        # Determine if loading from local path or HuggingFace Hub
+        # If llm_model_name is a local directory, don't use cache_dir
+        import os
+        is_local_path = os.path.isdir(llm_model_name)
+        load_kwargs = {
+            "trust_remote_code": True,
+        }
+        if not is_local_path and cache_dir:
+            load_kwargs["cache_dir"] = cache_dir
+        
         # ===== Stream A: Tool Semantic Encoding (Frozen) =====
         self.tokenizer = AutoTokenizer.from_pretrained(
             llm_model_name,
-            trust_remote_code=True,
-            cache_dir=cache_dir
+            **load_kwargs
         )
         
         if self.tokenizer.pad_token is None:
@@ -69,8 +78,7 @@ class ResourceEncoderForPretraining(nn.Module):
         # Load embedding layer from pretrained LLM
         llm_model = AutoModel.from_pretrained(
             llm_model_name,
-            trust_remote_code=True,
-            cache_dir=cache_dir
+            **load_kwargs
         )
         
         # Extract and freeze embedding layer

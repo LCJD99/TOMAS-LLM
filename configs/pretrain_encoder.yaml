@@ -19,14 +19,18 @@ data:
 # Model Configuration
 # ============================================================
 model:
-  llm_model: "Qwen/Qwen2.5-7B-Instruct"  # LLM model name
+  # LLM model - can be either HuggingFace model ID or local path
+  llm_model: "Qwen/Qwen2.5-7B-Instruct"  # HF model ID or local path
+  use_local_model: false  # Set to true if llm_model is a local directory path
+  local_model_path: null  # Alternative: specify local path here (overrides llm_model if set)
+  
   llm_hidden_dim: 3584  # Qwen2.5-7B hidden dimension
   d_resource: 3584  # Resource MLP output dimension
   num_attention_heads: 8  # Fusion attention heads
   dropout: 0.1
   num_tools: 7
   freeze_semantic: true  # Freeze Stream A (semantic embeddings)
-  cache_dir: "hub"
+  cache_dir: "hub"  # Only used when downloading from HuggingFace
 
 # ============================================================
 # Training Configuration
