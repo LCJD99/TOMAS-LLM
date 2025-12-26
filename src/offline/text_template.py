@@ -24,14 +24,21 @@ class ConfigTextTemplate:
         "large": "large"
     }
     
-    def __init__(self):
-        """Initialize the template generator."""
-        pass
+    def __init__(self, use_variations: bool = True):
+        """
+        Initialize the template generator.
+        
+        Args:
+            use_variations: Whether to use multiple template variations
+        """
+        self.use_variations = use_variations
+        self.variation_index = 0
     
     def format_single(
         self, 
         tool_name: str, 
-        resource_vector: Union[List[float], torch.Tensor, Dict[str, float]]
+        resource_vector: Union[List[float], torch.Tensor, Dict[str, float]],
+        variation_idx: int = 0
     ) -> str:
         """
         Convert a single (Tool, Resource) pair to natural language.
@@ -41,6 +48,7 @@ class ConfigTextTemplate:
             resource_vector: Either:
                 - List/Tensor: [input_size, cpu_cores, memory_gb, gpu_sm, gpu_memory_gb, latency_ms]
                 - Dict: {"input_size": ..., "cpu_cores": ..., ...}
+            variation_idx: Template variation index (0-4)
         
         Returns:
             Natural language description string.
@@ -68,18 +76,52 @@ class ConfigTextTemplate:
             size_map = {0: "small", 1: "medium", 2: "large"}
             input_size_str = size_map.get(int(input_size), "small")
         
-        # Generate template
-        template = (
-            f"Tool {tool_name} configuration: "
-            f"input size {input_size_str}, "
-            f"requires {int(cpu_cores)} CPU cores, "
-            f"{int(memory_gb)} GB memory, "
-            f"{int(gpu_sm)} GPU SMs, "
-            f"{int(gpu_memory_gb)} GB GPU memory, "
-            f"and latency is {int(latency_ms)} ms."
-        )
+        # Convert to int for cleaner output
+        cpu_cores = int(cpu_cores)
+        memory_gb = int(memory_gb)
+        gpu_sm = int(gpu_sm)
+        gpu_memory_gb = int(gpu_memory_gb)
+        latency_ms = int(latency_ms)
         
-        return template
+        # Multiple template variations to avoid all starting with "Tool"
+        if not self.use_variations:
+            variation_idx = 0
+        
+        templates = [
+            # Variation 0: Original format
+            (f"Tool {tool_name} configuration: "
+             f"input size {input_size_str}, "
+             f"requires {cpu_cores} CPU cores, "
+             f"{memory_gb} GB memory, "
+             f"{gpu_sm} GPU SMs, "
+             f"{gpu_memory_gb} GB GPU memory, "
+             f"and latency is {latency_ms} ms."),
+            
+            # Variation 1: Resource-first format
+            (f"Resource allocation for {tool_name}: "
+             f"{cpu_cores} CPU cores, {memory_gb} GB RAM, "
+             f"{gpu_sm} GPU SMs with {gpu_memory_gb} GB VRAM, "
+             f"processes {input_size_str} inputs in {latency_ms} ms."),
+            
+            # Variation 2: Performance-focused format
+            (f"The {tool_name} tool processes {input_size_str} inputs with {latency_ms} ms latency, "
+             f"using {cpu_cores} CPU cores, {memory_gb} GB memory, "
+             f"{gpu_sm} GPU SMs and {gpu_memory_gb} GB GPU memory."),
+            
+            # Variation 3: Specification format
+            (f"Configuration: {tool_name} | Input: {input_size_str} | "
+             f"CPU: {cpu_cores} cores, {memory_gb} GB | "
+             f"GPU: {gpu_sm} SMs, {gpu_memory_gb} GB | "
+             f"Latency: {latency_ms} ms"),
+            
+            # Variation 4: Natural description
+            (f"Running {tool_name} on {input_size_str} data needs "
+             f"{cpu_cores} cores and {memory_gb} GB of memory, "
+             f"plus {gpu_sm} SMs with {gpu_memory_gb} GB GPU memory, "
+             f"achieving {latency_ms} ms latency."),
+        ]
+        
+        return templates[variation_idx % len(templates)]
     
     def format_batch(
         self, 
