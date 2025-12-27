@@ -9,8 +9,8 @@ data:
   
   # Dataset augmentation settings
   augmentation:
-    mode: "both"  # "jitter", "variation", "both", "none"
-    num_copies: 10  # Number of augmented copies per config
+    mode: "variation"  # "jitter", "variation", "both", "none"
+    num_copies: 4  # Number of augmented copies per config
     jitter_ratio: 0.05  # ±5% noise for numerical jittering
     use_variation: true  # Use template variations
     seed: 42  # Random seed for reproducibility
@@ -20,8 +20,8 @@ data:
 # ============================================================
 model:
   # LLM model - can be either HuggingFace model ID or local path
-  llm_model: "Qwen/Qwen2.5-7B-Instruct"  # HF model ID or local path
-  use_local_model: false  # Set to true if llm_model is a local directory path
+  llm_model: "Qwen2.5-7B-Instruct"  # HF model ID or local path
+  use_local_model: true # Set to true if llm_model is a local directory path
   local_model_path: null  # Alternative: specify local path here (overrides llm_model if set)
   
   llm_hidden_dim: 3584  # Qwen2.5-7B hidden dimension
@@ -37,9 +37,9 @@ model:
 # ============================================================
 training:
   # Basic settings
-  batch_size: 32
+  batch_size: 8
   num_epochs: 100
-  learning_rate: 1.0e-4
+  learning_rate: 1.0e-5
   weight_decay: 0.01
   
   # Convergence settings
@@ -75,7 +75,7 @@ dataloader:
 # ============================================================
 output:
   output_dir: "assets"
-  checkpoint_freq: 10  # Save checkpoint every N epochs
+  checkpoint_freq: 1  # Save checkpoint every N epochs
   save_best_only: false  # Also save periodic checkpoints
   
   # Checkpoint naming
@@ -102,7 +102,7 @@ logging:
   
   # TensorBoard
   tensorboard:
-    enabled: false
+    enabled: true
     log_dir: "runs/pretrain_encoder"
 
 # ============================================================
