@@ -1,5 +1,16 @@
 """
-Encoder Pre-training Script for TOMAS-LLM (Multi-GPU Version).
+Encoder Pre-training Script for TOMAS-LLM (Multi-GPU Version - Redesigned).
+
+This script trains the Resource Encoder using the new architecture:
+- Stream A: Deep semantic encoding via LLM forward pass (frozen)
+- Stream B: Trainable resource MLP
+- Fusion: Gated cross-attention with learnable gate parameter (α)
+
+Key improvements:
+- Uses complete LLM forward pass for tool semantics (not just embedding layer)
+- Gated fusion ensures cold-start semantic alignment (α=0 initialization)
+- Precomputed semantic embeddings for efficient training
+- Monitors gate_alpha evolution during training
 """
 
 import argparse
@@ -73,9 +84,8 @@ class EncoderPretrainer:
         for param in llm_model.parameters():
             param.requires_grad = False
         
-        # Ensure encoder Stream A is frozen
-        for param in encoder.semantic_embedding.parameters():
-            param.requires_grad = False
+        # Note: Encoder Stream A (semantic_encoder) is already frozen by design
+        # No need to manually freeze it here
 
         # ### MODIFIED: 使用 accelerate.prepare 包装所有对象
         # 注意：llm_model 不需要 prepare，因为它是冻结的且可以手动通过 device_map 处理，
@@ -93,11 +103,16 @@ class EncoderPretrainer:
 
         # Initialize W&B (Only on main process)
         if log_wandb and self.accelerator.is_main_process:
+            unwrapped_encoder = self.accelerator.unwrap_model(self.encoder)
             wandb.init(project=project_name, config={
                 "model": "ResourceEncoderForPretraining",
+                "architecture": "Deep Semantic + Gated Fusion",
                 "llm_backbone": "Qwen2.5-7B",
-                # ### MODIFIED: 获取解包后的参数量
-                "trainable_params": sum(p.numel() for p in self.accelerator.unwrap_model(self.encoder).get_trainable_parameters())
+                "num_tools": unwrapped_encoder.num_tools,
+                "hidden_dim": unwrapped_encoder.llm_hidden_dim,
+                "gate_alpha_init": unwrapped_encoder.get_gate_value(),
+                "trainable_params": sum(p.numel() for p in unwrapped_encoder.get_trainable_parameters()),
+                "total_params": sum(p.numel() for p in unwrapped_encoder.parameters())
             })
         
         self.criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
@@ -180,9 +195,13 @@ class EncoderPretrainer:
         
         self.global_step += 1
         
+        # Get gate_alpha value for monitoring
+        gate_alpha = self.accelerator.unwrap_model(self.encoder).get_gate_value()
+        
         return {
             "loss": loss.item(),
             "lr": self.optimizer.param_groups[0]["lr"],
+            "gate_alpha": gate_alpha,
             "global_step": self.global_step
         }
 
@@ -206,7 +225,8 @@ class EncoderPretrainer:
                 pbar.set_postfix({
                     "loss": f"{metrics['loss']:.4f}",
                     "avg_loss": f"{epoch_loss/num_batches:.4f}",
-                    "lr": f"{metrics['lr']:.6f}"
+                    "lr": f"{metrics['lr']:.6f}",
+                    "α": f"{metrics['gate_alpha']:.4f}"
                 })
                 
                 if self.log_wandb and self.global_step % 10 == 0:
@@ -331,20 +351,23 @@ def main():
         pin_memory=True
     )
     
-    # 2. Initialize encoder
+    # 2. Initialize encoder (REDESIGNED API)
     if accelerator.is_main_process:
-        print("\n[2/5] Initializing encoder...")
+        print("\n[2/5] Initializing encoder (with deep semantic encoding)...")
         
     encoder = ResourceEncoderForPretraining(
         llm_model_name=model_cfg['llm_model'],
-        llm_hidden_dim=model_cfg['llm_hidden_dim'],
-        d_resource=model_cfg['d_resource'],
+        tool_registry_path=data_cfg['tool_registry'],  # NEW: Required for semantic encoding
+        d_resource=model_cfg.get('d_resource'),  # Optional: auto-matches LLM hidden dim
         num_attention_heads=model_cfg['num_attention_heads'],
         dropout=model_cfg['dropout'],
-        num_tools=model_cfg['num_tools'],
-        freeze_semantic=model_cfg['freeze_semantic'],
         cache_dir=model_cfg.get('cache_dir', 'hub')
     )
+    
+    if accelerator.is_main_process:
+        print(f"  ✓ Loaded {encoder.num_tools} tools")
+        print(f"  ✓ Hidden dimension: {encoder.llm_hidden_dim}")
+        print(f"  ✓ Gate alpha initialized to: {encoder.get_gate_value():.6f}")
     
     # 3. Load LLM
     if accelerator.is_main_process:
@@ -362,8 +385,12 @@ def main():
         **llm_load_kwargs
     )
     
-    breakpoint()
     # 4. Optimizer
+    if accelerator.is_main_process:
+        print("\n[4/5] Setting up optimizer and scheduler...")
+        trainable_params = sum(p.numel() for p in encoder.get_trainable_parameters())
+        total_params = sum(p.numel() for p in encoder.parameters())
+        print(f"  ✓ Trainable parameters: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
     optimizer = AdamW(
         encoder.get_trainable_parameters(),
         lr=train_cfg['learning_rate'],
@@ -411,7 +438,10 @@ def main():
         train_loss = epoch_metrics["train_loss"]
         
         if accelerator.is_main_process:
-            print(f"\nEpoch {epoch+1}/{train_cfg['num_epochs']} - Train Loss: {train_loss:.4f}")
+            # Get current gate_alpha value
+            gate_alpha = trainer.accelerator.unwrap_model(trainer.encoder).get_gate_value()
+            
+            print(f"\nEpoch {epoch+1}/{train_cfg['num_epochs']} - Train Loss: {train_loss:.4f} - Gate α: {gate_alpha:.4f}")
             
             # Save periodic checkpoint
             if (epoch + 1) % output_cfg['checkpoint_freq'] == 0:
