@@ -139,6 +139,10 @@ class EncoderPretrainer:
         
         encoder_embeddings = self.encoder(tool_ids, resource_vectors)
         
+        # Ensure encoder embeddings match LLM dtype (critical for mixed precision)
+        llm_dtype = next(self.llm_model.parameters()).dtype
+        encoder_embeddings = encoder_embeddings.to(llm_dtype)
+        
         combined_embeddings, combined_attention_mask = self.inject_prefix_embeddings(
             encoder_embeddings, input_ids, attention_mask
         )
@@ -149,10 +153,17 @@ class EncoderPretrainer:
             return_dict=True
         )
         
-        logits = outputs.logits[:, :-1, :]
+        # Shift logits and labels for causal LM
+        # outputs.logits: [B, L+1, V] (prefix + L tokens)
+        # We want to predict: [tok_0, tok_1, ..., tok_{L-1}]
+        # Using logits from: [prefix, tok_0, ..., tok_{L-2}]
+        shift_logits = outputs.logits[:, :-1, :].contiguous()  # [B, L, V]
+        shift_labels = labels.contiguous()  # [B, L]
+        
+        # Compute loss
         loss = self.criterion(
-            logits.reshape(-1, logits.size(-1)),
-            labels.reshape(-1)
+            shift_logits.reshape(-1, shift_logits.size(-1)),
+            shift_labels.reshape(-1)
         )
         
         self.optimizer.zero_grad()
@@ -351,6 +362,7 @@ def main():
         **llm_load_kwargs
     )
     
+    breakpoint()
     # 4. Optimizer
     optimizer = AdamW(
         encoder.get_trainable_parameters(),

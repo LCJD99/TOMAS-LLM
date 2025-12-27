@@ -45,8 +45,8 @@ def create_quick_test_config(base_config_path: str, num_train: int, num_val: int
     config['training']['eval_interval'] = 50
     
     # Use smaller model for testing
-    config['model']['llm_name'] = "Qwen/Qwen2.5-0.5B-Instruct"
-    config['model']['llm_embedding_dim'] = 1024
+    config['model']['llm_name'] = "Qwen2.5-7B-Instruct"
+    config['model']['llm_embedding_dim'] = 3584  # Qwen2.5-7B embedding size
     
     # Simpler encoder
     config['model']['temporal_encoder']['hidden_channels'] = 32
