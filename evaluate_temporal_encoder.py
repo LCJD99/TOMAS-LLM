@@ -38,6 +38,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def log_memory_usage(device: str, prefix: str = ""):
+    """Log current GPU memory usage."""
+    if device == 'cuda' and torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        logger.info(f"{prefix}GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
+
+
 def load_model_from_checkpoint(checkpoint_path: str, device: str):
     """
     Load trained model from checkpoint.
@@ -52,7 +60,10 @@ def load_model_from_checkpoint(checkpoint_path: str, device: str):
         checkpoint: Checkpoint dict (for metadata)
     """
     logger.info(f"Loading checkpoint from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Load checkpoint to CPU first to avoid OOM
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    
+    log_memory_usage(device, "Before loading model: ")
     
     # Infer config from checkpoint (or load from default)
     # For now, use default config
@@ -64,11 +75,15 @@ def load_model_from_checkpoint(checkpoint_path: str, device: str):
     
     # Load LLM and tokenizer
     logger.info(f"Loading LLM: {model_config['llm_name']}")
+    # Force fp16 for evaluation to save memory
     llm_model = AutoModelForCausalLM.from_pretrained(
         model_config['llm_name'],
         trust_remote_code=True,
-        torch_dtype=torch.float16 if config['training'].get('fp16', False) else torch.float32
+        torch_dtype=torch.float16,  # Always use fp16 for evaluation
+        device_map=device  # Load directly to device
     )
+    log_memory_usage(device, "After loading LLM: ")
+    
     tokenizer = AutoTokenizer.from_pretrained(
         model_config['llm_name'],
         trust_remote_code=True
@@ -104,10 +119,31 @@ def load_model_from_checkpoint(checkpoint_path: str, device: str):
         freeze_llm=model_config['freeze_llm']
     )
     
-    # Load weights
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model = model.to(device)
+    # Move temporal encoder to device and convert to fp16
+    temporal_encoder = temporal_encoder.to(device).half()
+    
+    # Create wrapper (LLM already on device from device_map)
+    model = TemporalLLMWrapper(
+        temporal_encoder=temporal_encoder,
+        llm_model=llm_model,
+        llm_embedding_dim=model_config['llm_embedding_dim'],
+        freeze_llm=model_config['freeze_llm']
+    )
+    
+    # Load weights from checkpoint
+    logger.info("Loading checkpoint weights...")
+    state_dict = checkpoint['model_state_dict']
+    # Convert state dict to fp16 if needed
+    state_dict = {k: v.half() if v.dtype == torch.float32 else v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
+    
+    log_memory_usage(device, "After loading full model: ")
+    
+    # Clear cache
+    if device == 'cuda':
+        torch.cuda.empty_cache()
+        log_memory_usage(device, "After clearing cache: ")
     
     logger.info(f"Model loaded from epoch {checkpoint['epoch']}, step {checkpoint['global_step']}")
     logger.info(f"Checkpoint train loss: {checkpoint['train_loss']:.4f}")
@@ -265,28 +301,27 @@ def evaluate_token_accuracy(
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Token Accuracy"):
-            curve = batch['curve'].to(device)
-            prompt_ids = batch['prompt_ids'].to(device)
-            target_ids = batch['target_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
+            batch_size = len(batch['curve'])
             
-            batch_size = curve.size(0)
-            
-            # Get model predictions
+            # Process samples one by one to save memory
             for i in range(batch_size):
+                curve = batch['curve'][i:i+1].to(device)
+                prompt_ids = batch['prompt_ids'][i:i+1].to(device)
+                target_ids = batch['target_ids'][i:i+1]
+                
                 # Generate for single sample
                 generated_ids = model.generate(
-                    curve=curve[i:i+1],
-                    prompt_ids=prompt_ids[i:i+1],
+                    curve=curve,
+                    prompt_ids=prompt_ids,
                     max_length=target_ids[i].size(0) + prompt_ids[i].size(0),
                     num_beams=1,
                     do_sample=False
                 )
                 
                 # Remove prompt tokens
-                prompt_len = prompt_ids[i].size(0)
+                prompt_len = prompt_ids[0].size(0)
                 generated_tokens = generated_ids[0, prompt_len:]
-                target_tokens = target_ids[i]
+                target_tokens = target_ids[0]
                 
                 # Calculate accuracy
                 min_len = min(len(generated_tokens), len(target_tokens))
@@ -294,6 +329,10 @@ def evaluate_token_accuracy(
                     total_tokens += min_len
                     matches = (generated_tokens[:min_len] == target_tokens[:min_len])
                     correct_tokens += matches.sum().item()
+                
+                # Clear cache periodically
+                if device == 'cuda' and i % 10 == 0:
+                    torch.cuda.empty_cache()
     
     accuracy = correct_tokens / total_tokens if total_tokens > 0 else 0.0
     
@@ -336,33 +375,34 @@ def evaluate_generation_quality(
             if samples_collected >= num_samples:
                 break
             
-            curve = batch['curve'].to(device)
-            prompt_ids = batch['prompt_ids'].to(device)
-            target_ids = batch['target_ids'].to(device)
-            
-            batch_size = curve.size(0)
+            batch_size = len(batch['curve'])
             
             for i in range(batch_size):
                 if samples_collected >= num_samples:
                     break
                 
+                # Load one sample at a time
+                curve = batch['curve'][i:i+1].to(device)
+                prompt_ids = batch['prompt_ids'][i:i+1].to(device)
+                target_ids = batch['target_ids'][i:i+1]
+                
                 # Generate
                 generated_ids = model.generate(
-                    curve=curve[i:i+1],
-                    prompt_ids=prompt_ids[i:i+1],
+                    curve=curve,
+                    prompt_ids=prompt_ids,
                     max_length=256,
                     num_beams=1,
                     do_sample=False
                 )
                 
                 # Decode
-                prompt_len = prompt_ids[i].size(0)
+                prompt_len = prompt_ids[0].size(0)
                 generated_text = tokenizer.decode(
                     generated_ids[0, prompt_len:],
                     skip_special_tokens=True
                 )
                 ground_truth_text = tokenizer.decode(
-                    target_ids[i],
+                    target_ids[0],
                     skip_special_tokens=True
                 )
                 
@@ -370,6 +410,10 @@ def evaluate_generation_quality(
                 ground_truth_texts.append(ground_truth_text)
                 
                 samples_collected += 1
+                
+                # Clear cache periodically
+                if device == 'cuda' and samples_collected % 10 == 0:
+                    torch.cuda.empty_cache()
     
     # Calculate numerical accuracy
     num_accuracy, num_correct, num_total = calculate_numerical_accuracy(
@@ -392,8 +436,8 @@ def main():
                        help='Path to config file')
     parser.add_argument('--num_samples', type=int, default=5000,
                        help='Number of samples to evaluate')
-    parser.add_argument('--batch_size', type=int, default=16,
-                       help='Batch size for evaluation')
+    parser.add_argument('--batch_size', type=int, default=4,
+                       help='Batch size for evaluation (use smaller batch for large models)')
     parser.add_argument('--output_dir', type=str, default='logs/temporal_pretrain/evaluation',
                        help='Output directory for results')
     parser.add_argument('--device', type=str, default='cuda',
