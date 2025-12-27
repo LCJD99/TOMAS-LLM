@@ -9,6 +9,9 @@ import torch.nn as nn
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 import json
+from src.decoders.token_gate import TokenTypeGate
+from src.decoders.tool_classifier import ToolClassifier
+from src.decoders.resource_regressor import ResourceRegressor
 
 
 @dataclass
@@ -121,9 +124,9 @@ class OutputParser(nn.Module):
     
     def __init__(
         self,
-        tool_classifier,
-        resource_regressor,
-        token_gate,
+        tool_classifier: ToolClassifier,
+        resource_regressor: ResourceRegressor,
+        token_gate: TokenTypeGate,
         tool_id_to_name: Optional[Dict[int, str]] = None,
     ):
         """

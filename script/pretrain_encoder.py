@@ -411,6 +411,7 @@ def main():
         model_path = model_cfg['llm_model']
     
     # Create output directory
+    import os
     os.makedirs(output_cfg['output_dir'], exist_ok=True)
     
     print("="*80)
