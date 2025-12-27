@@ -410,7 +410,7 @@ torchrun --nproc_per_node=4 --nnodes=2 --node_rank=0 \
 
 ## 模块三: 验证与评估
 
-### 3.1 定量评估
+### 3.1 定量评估 ✅ 已完成
 
 **文件**: `script/evaluate_temporal_encoder.py`
 
@@ -465,7 +465,7 @@ def evaluate(model, dataloader, device):
     }
 ```
 
-### 3.2 定性验证
+### 3.2 定性验证 ✅ 已完成
 
 **文件**: `tools/visualize_temporal_predictions.py`
 
@@ -573,10 +573,10 @@ tensorboard --logdir logs/temporal_pretrain/tensorboard
 3. ✅ 实现日志系统集成 (模块 4.2) - TensorBoard集成
 4. **验证**: 在小规模数据上运行 1 个 epoch
 
-### Phase 4: 评估框架 (优先级: 中)
+### Phase 4: 评估框架 (优先级: 中) ✅ 已完成
 
-1. 实现定量评估脚本 (模块 3.1)
-2. 实现定性可视化工具 (模块 3.2)
+1. ✅ 实现定量评估脚本 (模块 3.1) - 文件: `script/evaluate_temporal_encoder.py`
+2. ✅ 实现定性可视化工具 (模块 3.2) - 文件: `tools/visualize_temporal_predictions.py`
 3. **验证**: 在训练后的检查点上运行评估
 
 ### Phase 5: 优化与扩展 (优先级: 低)
@@ -713,12 +713,12 @@ src/context/
 script/
   pretrain_temporal_encoder.py      # 训练脚本 ✅
   pretrain_temporal_encoder_ddp.py  # 分布式训练 ✅
-  evaluate_temporal_encoder.py      # 评估脚本
+  evaluate_temporal_encoder.py      # 评估脚本 ✅
   quick_test_temporal.py            # 快速测试 ✅
 
 tools/
   validate_temporal_dataset.py      # 数据验证 ✅
-  visualize_temporal_predictions.py # 预测可视化
+  visualize_temporal_predictions.py # 预测可视化 ✅
   monitor_training.py               # 训练监控
 
 configs/
@@ -820,23 +820,52 @@ torchrun --nproc_per_node=4 --nnodes=2 --node_rank=1 \
   --config configs/pretrain_temporal.yaml
 ```
 
-### 9.5 评估
+### 9.5 评估 ✅ 已实现
 
+**定量评估**:
 ```bash
 python script/evaluate_temporal_encoder.py \
-  --checkpoint checkpoints/temporal_pretrain/epoch_10_step_10000.pt \
+  --checkpoint checkpoints/temporal_pretrain/best_model.pt \
   --num_samples 5000 \
-  --output_dir logs/temporal_pretrain
+  --output_dir logs/temporal_pretrain/evaluation
+
+# 指定配置文件
+python script/evaluate_temporal_encoder.py \
+  --checkpoint checkpoints/temporal_pretrain/epoch_10_step_10000.pt \
+  --config configs/pretrain_temporal.yaml \
+  --num_samples 5000 \
+  --batch_size 16
 ```
 
-### 9.6 可视化预测
+**输出指标**:
+- Overall Perplexity (总体困惑度)
+- Per-Task Perplexity (Type A/B/C 各自的困惑度)
+- Token Accuracy (token准确率)
+- Numerical Accuracy (数值准确率)
+- 评估结果JSON文件
+
+### 9.6 可视化预测 ✅ 已实现
 
 ```bash
 python tools/visualize_temporal_predictions.py \
-  --checkpoint checkpoints/temporal_pretrain/epoch_10_step_10000.pt \
+  --checkpoint checkpoints/temporal_pretrain/best_model.pt \
   --num_samples 20 \
   --output logs/temporal_pretrain/predictions_visualization.html
+
+# 自定义样本数量和设备
+python tools/visualize_temporal_predictions.py \
+  --checkpoint checkpoints/temporal_pretrain/epoch_10_step_10000.pt \
+  --num_samples 50 \
+  --device cuda \
+  --output logs/my_visualization.html
 ```
+
+**输出内容**:
+- 交互式HTML报告
+- 资源曲线SVG可视化
+- Prompt、Ground Truth、Prediction对比
+- 差异高亮显示
+- 任务类型统计
 
 ---
 
