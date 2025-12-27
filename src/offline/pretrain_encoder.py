@@ -1,40 +1,49 @@
 """
-Resource Encoder for Pre-training.
+Resource Encoder for Pre-training (Redesigned).
 
 This encoder learns to compress 6D resource vectors into LLM-understandable embeddings
 through self-supervised language modeling.
 
-Architecture:
-1. Stream A (Semantic): Frozen Qwen2.5 embedding layer for tool names
+Architecture (NEW):
+1. Stream A (Semantic): Deep LLM forward pass with EOS token extraction (frozen)
 2. Stream B (Resource): Trainable MLP for resource vectors
-3. Fusion: Trainable self-attention to combine streams
+3. Fusion: Gated cross-attention with learnable gate parameter
+
+Key improvements:
+- Stream A uses full transformer layers (not just embedding)
+- Gated fusion ensures cold-start semantic alignment
+- Precomputed semantic embeddings for efficient training
 """
 
 import torch
 import torch.nn as nn
-from transformers import AutoModel, AutoTokenizer
 from typing import Optional
 
+from src.encoders.semantic_encoder import SemanticEncoder
 from src.encoders.resource_mlp import ResourceMLP
+from src.encoders.gated_fusion import GatedFusion
 
 
 class ResourceEncoderForPretraining(nn.Module):
     """
-    Encoder for pre-training with self-supervised task.
+    Encoder for pre-training with self-supervised task (REDESIGNED).
     
     Learns to map (Tool ID + Resource Vector) to an embedding that enables
     the LLM to generate natural language descriptions of the configuration.
+    
+    New architecture:
+    - Stream A: Deep semantic encoding via LLM forward pass
+    - Stream B: Trainable resource MLP
+    - Fusion: Gated cross-attention (α initialized to 0)
     """
     
     def __init__(
         self,
         llm_model_name: str = "Qwen/Qwen2.5-7B",
-        llm_hidden_dim: int = 3584,
-        d_resource: int = 3584,
+        tool_registry_path: str = "data/tool_registry/tools.json",
+        d_resource: Optional[int] = None,
         num_attention_heads: int = 8,
         dropout: float = 0.1,
-        num_tools: int = 7,
-        freeze_semantic: bool = True,
         cache_dir: str = "hub"
     ):
         """
@@ -42,120 +51,52 @@ class ResourceEncoderForPretraining(nn.Module):
         
         Args:
             llm_model_name: HuggingFace model identifier for semantic stream
-            llm_hidden_dim: Hidden dimension of LLM (3584 for Qwen2.5-7B)
-            d_resource: Output dimension for resource MLP
+            tool_registry_path: Path to tools.json with descriptions
+            d_resource: Output dimension for resource MLP (default: match LLM hidden dim)
             num_attention_heads: Number of heads in fusion attention
             dropout: Dropout probability
-            num_tools: Number of tools (for tool embedding)
-            freeze_semantic: Whether to freeze Stream A (semantic)
             cache_dir: Cache directory for models
         """
         super().__init__()
         
-        self.llm_hidden_dim = llm_hidden_dim
+        # ===== Stream A: Deep Semantic Encoding (Frozen) =====
+        self.semantic_encoder = SemanticEncoder(
+            llm_model_name=llm_model_name,
+            tool_registry_path=tool_registry_path,
+            cache_dir=cache_dir
+        )
+        
+        # Get hidden dimension from semantic encoder
+        self.llm_hidden_dim = self.semantic_encoder.get_embedding_dim()
+        
+        # Set d_resource to match hidden_dim if not specified
+        if d_resource is None:
+            d_resource = self.llm_hidden_dim
+        
         self.d_resource = d_resource
-        self.freeze_semantic = freeze_semantic
-        
-        # Determine if loading from local path or HuggingFace Hub
-        # If llm_model_name is a local directory, don't use cache_dir
-        import os
-        is_local_path = os.path.isdir(llm_model_name)
-        load_kwargs = {
-            "trust_remote_code": True,
-        }
-        if not is_local_path and cache_dir:
-            load_kwargs["cache_dir"] = cache_dir
-        
-        # ===== Stream A: Tool Semantic Encoding (Frozen) =====
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            llm_model_name,
-            **load_kwargs
-        )
-        
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        # Load embedding layer from pretrained LLM
-        llm_model = AutoModel.from_pretrained(
-            llm_model_name,
-            **load_kwargs
-        )
-        
-        # Extract and freeze embedding layer
-        self.semantic_embedding = llm_model.get_input_embeddings()
-        
-        if freeze_semantic:
-            for param in self.semantic_embedding.parameters():
-                param.requires_grad = False
-        
-        # Create tool name lookup (tool_id -> tool_name)
-        self.tool_names = [
-            "image_classification",
-            "text_summarization", 
-            "image_captioning",
-            "object_detection",
-            "machine_translation",
-            "super_resolution",
-            "visual_question_answering"
-        ]
-        
-        # Pre-tokenize tool names for efficiency
-        self._precompute_tool_tokens()
         
         # ===== Stream B: Resource Encoding (Trainable) =====
         self.resource_mlp = ResourceMLP(
+            input_dim=6,
+            hidden_dim=512,
             d_resource=d_resource,
             dropout=dropout
         )
         
-        # ===== Fusion: Self-Attention (Trainable) =====
-        self.fusion_attention = nn.MultiheadAttention(
-            embed_dim=llm_hidden_dim,
+        # ===== Fusion: Gated Cross-Attention (Trainable) =====
+        self.fusion = GatedFusion(
+            hidden_dim=self.llm_hidden_dim,
             num_heads=num_attention_heads,
-            dropout=dropout,
-            batch_first=True
+            dropout=dropout
         )
         
-        self.fusion_norm = nn.LayerNorm(llm_hidden_dim)
-        
-        # Initialize trainable parameters
-        self._init_weights()
-    
-    def _precompute_tool_tokens(self):
-        """Pre-tokenize all tool names and store as buffers."""
-        tool_token_ids = []
-        
-        for tool_name in self.tool_names:
-            # Tokenize tool name
-            tokens = self.tokenizer(
-                tool_name,
-                return_tensors="pt",
-                add_special_tokens=False
-            )["input_ids"]
-            tool_token_ids.append(tokens.squeeze(0))
-        
-        # Store as padded tensor
-        max_len = max(len(t) for t in tool_token_ids)
-        padded_tokens = torch.zeros(len(self.tool_names), max_len, dtype=torch.long)
-        
-        for i, tokens in enumerate(tool_token_ids):
-            padded_tokens[i, :len(tokens)] = tokens
-        
-        # Register as buffer (moves to device automatically)
-        self.register_buffer("tool_token_ids", padded_tokens)
-    
-    def _init_weights(self):
-        """Initialize trainable parameters (Xavier/He init)."""
-        # ResourceMLP is already initialized in its __init__
-        
-        # Initialize fusion attention (already done by PyTorch)
-        # Just ensure layer norm is properly initialized
-        nn.init.ones_(self.fusion_norm.weight)
-        nn.init.zeros_(self.fusion_norm.bias)
+        # Store metadata
+        self.tool_names = self.semantic_encoder.tool_names
+        self.num_tools = self.semantic_encoder.get_num_tools()
     
     def encode_semantic(self, tool_ids: torch.Tensor) -> torch.Tensor:
         """
-        Encode tool semantics using frozen LLM embeddings.
+        Encode tool semantics using precomputed deep LLM embeddings.
         
         Args:
             tool_ids: Tensor of shape [batch_size]
@@ -163,21 +104,7 @@ class ResourceEncoderForPretraining(nn.Module):
         Returns:
             Semantic embeddings of shape [batch_size, llm_hidden_dim]
         """
-        batch_size = tool_ids.size(0)
-        device = tool_ids.device
-        
-        # Get token IDs for each tool
-        tool_tokens = self.tool_token_ids[tool_ids]  # [batch, max_token_len]
-        
-        # Get embeddings
-        with torch.set_grad_enabled(not self.freeze_semantic):
-            token_embeddings = self.semantic_embedding(tool_tokens)  # [batch, max_token_len, hidden]
-        
-        # Mean pooling over token dimension
-        # Note: This is simple mean pooling. For better quality, could use attention mask.
-        semantic_emb = token_embeddings.mean(dim=1)  # [batch, hidden]
-        
-        return semantic_emb
+        return self.semantic_encoder(tool_ids)
     
     def encode_resource(self, resource_vectors: torch.Tensor) -> torch.Tensor:
         """
@@ -197,7 +124,7 @@ class ResourceEncoderForPretraining(nn.Module):
         resource_emb: torch.Tensor
     ) -> torch.Tensor:
         """
-        Fuse semantic and resource streams using self-attention.
+        Fuse semantic and resource streams using gated cross-attention.
         
         Args:
             semantic_emb: [batch_size, hidden_dim]
@@ -206,22 +133,7 @@ class ResourceEncoderForPretraining(nn.Module):
         Returns:
             Fused embedding [batch_size, hidden_dim]
         """
-        # Stack to create sequence: [semantic, resource]
-        stacked = torch.stack([semantic_emb, resource_emb], dim=1)  # [batch, 2, hidden]
-        
-        # Self-attention
-        attended, _ = self.fusion_attention(
-            stacked, stacked, stacked,
-            need_weights=False
-        )  # [batch, 2, hidden]
-        
-        # Residual connection + LayerNorm
-        fused = self.fusion_norm(attended + stacked)  # [batch, 2, hidden]
-        
-        # Take first token as final embedding
-        final_emb = fused[:, 0, :]  # [batch, hidden]
-        
-        return final_emb
+        return self.fusion(semantic_emb, resource_emb)
     
     def forward(
         self, 
@@ -253,24 +165,27 @@ class ResourceEncoderForPretraining(nn.Module):
         """Get only the trainable parameters (Stream B + Fusion)."""
         trainable_params = []
         
-        # Resource MLP parameters
+        # Resource MLP parameters (Stream B)
         trainable_params.extend(self.resource_mlp.parameters())
         
-        # Fusion attention parameters
-        trainable_params.extend(self.fusion_attention.parameters())
-        trainable_params.extend(self.fusion_norm.parameters())
+        # Gated fusion parameters
+        trainable_params.extend(self.fusion.parameters())
         
         return trainable_params
+    
+    def get_gate_value(self) -> float:
+        """Get current gate parameter value from fusion module."""
+        return self.fusion.get_gate_value()
 
 
 def test_pretrain_encoder():
     """Test the pre-training encoder."""
-    print("=== Testing ResourceEncoderForPretraining ===\n")
+    print("=== Testing ResourceEncoderForPretraining (Redesigned) ===\n")
     
-    # Initialize encoder
+    # Initialize encoder with small model for testing
     encoder = ResourceEncoderForPretraining(
-        llm_model_name="Qwen/Qwen2.5-7B-Instruct",
-        freeze_semantic=True
+        llm_model_name="Qwen/Qwen2.5-0.5B",
+        tool_registry_path="data/tool_registry/tools.json"
     )
     
     # Move to device
@@ -278,8 +193,11 @@ def test_pretrain_encoder():
     encoder = encoder.to(device)
     
     print(f"Device: {device}")
-    print(f"Model initialized with {sum(p.numel() for p in encoder.parameters()):,} total parameters")
+    print(f"Number of tools: {encoder.num_tools}")
+    print(f"Hidden dimension: {encoder.llm_hidden_dim}")
+    print(f"Total parameters: {sum(p.numel() for p in encoder.parameters()):,}")
     print(f"Trainable parameters: {sum(p.numel() for p in encoder.get_trainable_parameters()):,}")
+    print(f"Gate alpha: {encoder.get_gate_value():.6f}")
     print()
     
     # Create dummy batch
@@ -297,7 +215,7 @@ def test_pretrain_encoder():
         embeddings = encoder(tool_ids, resource_vectors)
     
     print(f"Output shape: {embeddings.shape}")
-    print(f"Expected: [batch_size={batch_size}, hidden_dim=3584]")
+    print(f"Expected: [batch_size={batch_size}, hidden_dim={encoder.llm_hidden_dim}]")
     print()
     
     # Test individual components
@@ -309,6 +227,10 @@ def test_pretrain_encoder():
         
         print(f"Semantic embedding shape: {semantic_emb.shape}")
         print(f"Resource embedding shape: {resource_emb.shape}")
+        
+        # Test semantic quality
+        cos_sim = torch.cosine_similarity(semantic_emb[0], semantic_emb[1], dim=0)
+        print(f"Semantic similarity (tool 0 vs 1): {cos_sim:.4f}")
     
     print("\n✓ All tests passed!")
 
