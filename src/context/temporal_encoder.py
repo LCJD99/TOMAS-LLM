@@ -295,7 +295,8 @@ class TemporalEncoder(nn.Module):
         cnn_config: Optional[Dict] = None,
         min_timesteps: int = 5,           # Minimum number of timesteps
         max_timesteps: int = 50,          # Maximum number of timesteps
-        time_granularity_ms: int = 100    # Time step granularity
+        time_granularity_ms: int = 100,   # Time step granularity
+        llm_embedding_dim: Optional[int] = None  # LLM embedding dimension for projector
     ):
         """
         Initialize Temporal Encoder.
@@ -307,6 +308,7 @@ class TemporalEncoder(nn.Module):
             min_timesteps: Minimum number of timesteps to use
             max_timesteps: Maximum number of timesteps to use
             time_granularity_ms: Timestep granularity in milliseconds
+            llm_embedding_dim: LLM embedding dimension (if None, no projector)
         """
         super().__init__()
         
@@ -330,6 +332,19 @@ class TemporalEncoder(nn.Module):
                 'pooling': 'adaptive_avg'
             }
         self.cnn = TemporalCNN(**cnn_config)
+        self.cnn_output_dim = cnn_config['output_dim']
+        
+        # Projector (optional, for LLM alignment)
+        self.llm_embedding_dim = llm_embedding_dim
+        if llm_embedding_dim is not None:
+            self.projector = nn.Sequential(
+                nn.Linear(self.cnn_output_dim, llm_embedding_dim),
+                nn.GELU(),
+                nn.Linear(llm_embedding_dim, llm_embedding_dim),
+                nn.LayerNorm(llm_embedding_dim)
+            )
+        else:
+            self.projector = None
     
     def extract_timeline_window(
         self,
@@ -425,6 +440,53 @@ class TemporalEncoder(nn.Module):
     def set_timeline(self, timeline: SystemTimeline):
         """Update timeline."""
         self.timeline = timeline
+    
+    def forward_batch(self, curves: torch.Tensor) -> torch.Tensor:
+        """
+        Process a batch of resource curves.
+        
+        Args:
+            curves: Tensor of shape (batch, num_timesteps, 4)
+        
+        Returns:
+            Embeddings of shape (batch, output_dim) or (batch, llm_embedding_dim)
+        """
+        batch_size = curves.size(0)
+        
+        # Normalize
+        normalized_curves = self.normalizer.normalize(curves)  # (batch, T, 4)
+        
+        # Reshape for CNN: (batch, channels=4, time_steps)
+        cnn_input = normalized_curves.transpose(1, 2)  # (batch, 4, T)
+        
+        # Apply CNN
+        v_temporal = self.cnn(cnn_input)  # (batch, output_dim)
+        
+        # Apply projector if available
+        if self.projector is not None:
+            v_temporal = self.projector(v_temporal)  # (batch, llm_embedding_dim)
+        
+        return v_temporal
+    
+    def forward_with_projection(self, t_inf_ms: float, t_end_ms: Optional[float] = None) -> torch.Tensor:
+        """
+        Forward pass with optional projection to LLM embedding space.
+        
+        Args:
+            t_inf_ms: Predicted latency or start time
+            t_end_ms: End time (if None, use timeline's max)
+        
+        Returns:
+            v_temporal: Embedding (output_dim,) or (llm_embedding_dim,) if projector exists
+        """
+        # Get CNN output
+        v_temporal = self.forward(t_inf_ms, t_end_ms)  # (output_dim,)
+        
+        # Apply projector if available
+        if self.projector is not None:
+            v_temporal = self.projector(v_temporal.unsqueeze(0)).squeeze(0)  # (llm_embedding_dim,)
+        
+        return v_temporal
     
     @classmethod
     def from_config(cls, config: Dict, timeline: Optional[SystemTimeline] = None) -> 'TemporalEncoder':
