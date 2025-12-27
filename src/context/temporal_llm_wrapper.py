@@ -149,29 +149,34 @@ class TemporalLLMWrapper(nn.Module):
         # 2. Get LLM embeddings for prompt
         prompt_embeds = self.llm_model.get_input_embeddings()(prompt_ids)  # (batch, prompt_len, llm_dim)
         
-        # 3. Prepend temporal embedding as first token
+        # 3. Ensure dtype compatibility with LLM
+        llm_dtype = prompt_embeds.dtype
+        if v_temporal.dtype != llm_dtype:
+            v_temporal = v_temporal.to(llm_dtype)
+        
+        # 4. Prepend temporal embedding as first token
         combined_embeds = torch.cat([
             v_temporal.unsqueeze(1),  # (batch, 1, llm_dim)
             prompt_embeds             # (batch, prompt_len, llm_dim)
         ], dim=1)  # (batch, 1 + prompt_len, llm_dim)
         
-        # 4. Get target embeddings (for teacher forcing)
+        # 5. Get target embeddings (for teacher forcing)
         target_embeds = self.llm_model.get_input_embeddings()(target_ids)  # (batch, target_len, llm_dim)
         
-        # 5. Combine all embeddings
+        # 6. Combine all embeddings
         full_embeds = torch.cat([
             combined_embeds,  # temporal + prompt
             target_embeds     # target
         ], dim=1)  # (batch, 1 + prompt_len + target_len, llm_dim)
         
-        # 6. Extend attention mask
+        # 7. Extend attention mask
         extended_mask = self._extend_attention_mask(attention_mask)  # (batch, 1 + seq_len)
         
-        # 7. Prepare labels
+        # 8. Prepare labels
         prompt_len = 1 + prompt_ids.size(1)  # Including temporal token
         labels = self._prepare_labels(prompt_ids, target_ids, prompt_len)
         
-        # 8. Forward through LLM
+        # 9. Forward through LLM
         outputs = self.llm_model(
             inputs_embeds=full_embeds,
             attention_mask=extended_mask,
@@ -223,16 +228,21 @@ class TemporalLLMWrapper(nn.Module):
         # 2. Get prompt embeddings
         prompt_embeds = self.llm_model.get_input_embeddings()(prompt_ids)  # (1, prompt_len, llm_dim)
         
-        # 3. Combine temporal + prompt
+        # 3. Ensure dtype compatibility with LLM
+        llm_dtype = prompt_embeds.dtype
+        if v_temporal.dtype != llm_dtype:
+            v_temporal = v_temporal.to(llm_dtype)
+        
+        # 4. Combine temporal + prompt
         combined_embeds = torch.cat([
             v_temporal.unsqueeze(1),  # (1, 1, llm_dim)
             prompt_embeds             # (1, prompt_len, llm_dim)
         ], dim=1)  # (1, 1 + prompt_len, llm_dim)
         
-        # 4. Create attention mask
+        # 5. Create attention mask
         attention_mask = torch.ones(batch_size, combined_embeds.size(1), device=curve.device)
         
-        # 5. Generate
+        # 6. Generate
         # Note: Some models don't support inputs_embeds for generation
         # In that case, we need to use a different approach
         try:
