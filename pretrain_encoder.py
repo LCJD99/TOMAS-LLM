@@ -130,6 +130,49 @@ class EncoderPretrainer:
             print(f"\n[Profiler] Enabled - Output directory: {self.profiler_output_dir}")
             print("[Profiler] Will profile first 5 batches with memory tracking")
     
+    def inject_embeddings_at_placeholder(
+        self, 
+        encoder_embeddings: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        placeholder_positions: torch.Tensor
+    ) -> tuple:
+        """
+        Inject encoder embeddings at [TOOL_RESOURCE] placeholder positions.
+        
+        Args:
+            encoder_embeddings: [B, D] encoder output
+            input_ids: [B, L] token IDs
+            attention_mask: [B, L] attention mask
+            placeholder_positions: [B] position indices where placeholder starts
+        
+        Returns:
+            (combined_embeddings, combined_attention_mask, injection_positions)
+            - combined_embeddings: [B, L, D] with encoder embedding injected
+            - combined_attention_mask: [B, L] attention mask
+            - injection_positions: [B] actual injection position for each sample
+        """
+        batch_size = encoder_embeddings.size(0)
+        
+        try:
+            embed_layer = self.llm_model.get_input_embeddings()
+        except AttributeError:
+            embed_layer = self.llm_model.module.get_input_embeddings()
+        
+        # Get token embeddings for the entire sequence
+        token_embeddings = embed_layer(input_ids)  # [B, L, D]
+        
+        # Inject encoder embeddings at placeholder positions
+        # We'll replace the first token of the placeholder with encoder embedding
+        combined_embeddings = token_embeddings.clone()
+        
+        for i in range(batch_size):
+            pos = placeholder_positions[i].item()
+            # Replace the placeholder position with encoder embedding
+            combined_embeddings[i, pos] = encoder_embeddings[i]
+        
+        return combined_embeddings, attention_mask, placeholder_positions
+    
     def inject_prefix_embeddings(self, encoder_embeddings, input_ids, attention_mask):
         # 逻辑保持不变，Tensor 已经在正确的 device 上
         batch_size = encoder_embeddings.size(0)
@@ -162,6 +205,7 @@ class EncoderPretrainer:
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
         labels = batch["labels"]
+        placeholder_positions = batch["placeholder_pos"]  # NEW: placeholder positions
         
         encoder_embeddings = self.encoder(tool_ids, resource_vectors)
         
@@ -169,8 +213,9 @@ class EncoderPretrainer:
         llm_dtype = next(self.llm_model.parameters()).dtype
         encoder_embeddings = encoder_embeddings.to(llm_dtype)
         
-        combined_embeddings, combined_attention_mask = self.inject_prefix_embeddings(
-            encoder_embeddings, input_ids, attention_mask
+        # Inject encoder embeddings at placeholder positions (instead of prefix)
+        combined_embeddings, combined_attention_mask, injection_positions = self.inject_embeddings_at_placeholder(
+            encoder_embeddings, input_ids, attention_mask, placeholder_positions
         )
         
         outputs = self.llm_model(
@@ -179,17 +224,35 @@ class EncoderPretrainer:
             return_dict=True
         )
         
+        # Compute loss - only for tokens AFTER the placeholder
+        # outputs.logits: [B, L, V]
+        # We want to predict tokens starting from placeholder position + 1
+        
+        batch_size = outputs.logits.size(0)
+        seq_len = outputs.logits.size(1)
+        vocab_size = outputs.logits.size(2)
+        
+        # Create a mask to ignore loss before placeholder position
+        loss_mask = torch.zeros_like(labels, dtype=torch.bool)
+        for i in range(batch_size):
+            pos = injection_positions[i].item()
+            # Only compute loss for tokens after the placeholder (pos+1 onwards)
+            loss_mask[i, pos+1:] = True
+        
         # Shift logits and labels for causal LM
-        # outputs.logits: [B, L+1, V] (prefix + L tokens)
-        # We want to predict: [tok_0, tok_1, ..., tok_{L-1}]
-        # Using logits from: [prefix, tok_0, ..., tok_{L-2}]
-        shift_logits = outputs.logits[:, :-1, :].contiguous()  # [B, L, V]
-        shift_labels = labels.contiguous()  # [B, L]
+        # For position i, we use logit[i] to predict label[i+1]
+        shift_logits = outputs.logits[:, :-1, :].contiguous()  # [B, L-1, V]
+        shift_labels = labels[:, 1:].contiguous()  # [B, L-1]
+        shift_loss_mask = loss_mask[:, 1:].contiguous()  # [B, L-1]
+        
+        # Apply loss mask: set labels to ignore_index where mask is False
+        masked_labels = shift_labels.clone()
+        masked_labels[~shift_loss_mask] = self.tokenizer.pad_token_id
         
         # Compute loss
         loss = self.criterion(
-            shift_logits.reshape(-1, shift_logits.size(-1)),
-            shift_labels.reshape(-1)
+            shift_logits.reshape(-1, vocab_size),
+            masked_labels.reshape(-1)
         )
         
         self.optimizer.zero_grad()

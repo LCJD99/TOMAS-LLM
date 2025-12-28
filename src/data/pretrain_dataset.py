@@ -172,15 +172,16 @@ class EncoderPretrainDataset(Dataset):
                 else:
                     resource_vector = base_resource.copy()
                 
-                # Select template variation
+                # Select template variation - use placeholder format
                 if self.use_variation and self.augmentation_mode in ["variation", "both"]:
                     variation_idx = copy_idx % 3  # Cycle through 3 variations
-                    text = self.template_gen.format_with_variation(
-                        tool_name, resource_vector, variation_idx
-                    )
                 else:
                     variation_idx = 0
-                    text = self.template_gen.format_single(tool_name, resource_vector)
+                
+                # Use the new placeholder-based template
+                text = self.template_gen.format_with_embedding_placeholder(
+                    tool_name, resource_vector, variation_idx
+                )
                 
                 samples.append({
                     "tool_name": tool_name,
@@ -265,12 +266,35 @@ class EncoderPretrainDataset(Dataset):
             return_tensors="pt"
         )
         
+        # Find the position of [TOOL_RESOURCE] placeholder
+        # Tokenize the placeholder to find its token IDs
+        placeholder_encoding = self.tokenizer(
+            "[TOOL_RESOURCE]",
+            add_special_tokens=False
+        )
+        placeholder_ids = placeholder_encoding["input_ids"]
+        
+        # Find where the placeholder appears in the tokenized sequence
+        input_ids = encoding["input_ids"].squeeze(0)
+        placeholder_pos = -1
+        
+        # Search for the placeholder token sequence
+        for i in range(len(input_ids) - len(placeholder_ids) + 1):
+            if all(input_ids[i + j] == placeholder_ids[j] for j in range(len(placeholder_ids))):
+                placeholder_pos = i
+                break
+        
+        # If placeholder not found (truncated), use position 10 as fallback
+        if placeholder_pos == -1:
+            placeholder_pos = 10
+        
         return {
             "tool_id": torch.tensor(sample["tool_id"], dtype=torch.long),
             "resource_vector": resource_tensor,
             "input_ids": encoding["input_ids"].squeeze(0),
             "attention_mask": encoding["attention_mask"].squeeze(0),
-            "labels": encoding["input_ids"].squeeze(0)  # For causal LM loss
+            "labels": encoding["input_ids"].squeeze(0),  # For causal LM loss
+            "placeholder_pos": torch.tensor(placeholder_pos, dtype=torch.long)
         }
     
     def get_statistics(self) -> Dict:

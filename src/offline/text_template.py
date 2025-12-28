@@ -143,6 +143,75 @@ class ConfigTextTemplate:
             for item in data_list
         ]
     
+    def format_with_embedding_placeholder(
+        self,
+        tool_name: str,
+        resource_vector: Union[List[float], torch.Tensor, Dict[str, float]],
+        variation_idx: int = 0
+    ) -> str:
+        """
+        Generate template with [TOOL_RESOURCE] placeholder for encoder embedding injection.
+        
+        Format: "The information and resource constraint of the tool is expressed as [TOOL_RESOURCE], 
+                 that means Tool {tool_name} processes..."
+        
+        Args:
+            tool_name: Name of the tool
+            resource_vector: Resource configuration
+            variation_idx: Index to select template variation (0-2)
+        
+        Returns:
+            Natural language description with [TOOL_RESOURCE] placeholder.
+        """
+        # Parse resource vector (same as format_single)
+        if isinstance(resource_vector, dict):
+            input_size = resource_vector["input_size"]
+            cpu_cores = resource_vector["cpu_cores"]
+            memory_gb = resource_vector["memory_gb"]
+            gpu_sm = resource_vector["gpu_sm"]
+            gpu_memory_gb = resource_vector["gpu_memory_gb"]
+            latency_ms = resource_vector["latency_ms"]
+        else:
+            if isinstance(resource_vector, torch.Tensor):
+                resource_vector = resource_vector.tolist()
+            input_size, cpu_cores, memory_gb, gpu_sm, gpu_memory_gb, latency_ms = resource_vector
+        
+        # Format input size
+        if isinstance(input_size, str):
+            input_size_str = input_size
+        else:
+            size_map = {0: "small", 1: "medium", 2: "large"}
+            input_size_str = size_map.get(int(input_size), "small")
+        
+        # Template variations with placeholder
+        templates = [
+            # Variation 0: Standard format with placeholder
+            (
+                f"The information and resource constraint of the tool is expressed as [TOOL_RESOURCE], "
+                f"that means Tool {tool_name} processes {input_size_str} input with "
+                f"{int(cpu_cores)} CPU cores, {int(memory_gb)} GB memory, "
+                f"{int(gpu_sm)} GPU SMs, {int(gpu_memory_gb)} GB GPU memory, "
+                f"and achieves {int(latency_ms)} ms latency."
+            ),
+            # Variation 1: Alternative phrasing
+            (
+                f"The tool configuration is represented as [TOOL_RESOURCE], "
+                f"which indicates {tool_name} operates on {input_size_str} data using "
+                f"{int(cpu_cores)} cores, {int(memory_gb)} GB RAM, "
+                f"{int(gpu_sm)} SMs with {int(gpu_memory_gb)} GB GPU memory, "
+                f"completing in {int(latency_ms)} ms."
+            ),
+            # Variation 2: Concise format
+            (
+                f"As [TOOL_RESOURCE] describes, {tool_name} requires "
+                f"{int(cpu_cores)} CPU cores and {int(memory_gb)} GB memory, "
+                f"with {int(gpu_sm)} GPU SMs and {int(gpu_memory_gb)} GB GPU memory "
+                f"to process {input_size_str} inputs in {int(latency_ms)} ms."
+            ),
+        ]
+        
+        return templates[variation_idx % len(templates)]
+    
     def format_with_variation(
         self,
         tool_name: str,
