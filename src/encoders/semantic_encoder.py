@@ -199,6 +199,8 @@ class SemanticEncoder(nn.Module):
         # Stack and register as buffer
         embeddings_tensor = torch.stack(embeddings)  # [num_tools, hidden_dim]
         self.register_buffer("tool_semantic_embeddings", embeddings_tensor)
+
+        self.llm_model.cpu()  # Free up GPU memory
         
         logger.info(f"Semantic embeddings precomputed: {embeddings_tensor.shape}")
         logger.info("Stream A (Semantic Encoder) ready for training.")

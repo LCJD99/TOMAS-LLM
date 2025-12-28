@@ -29,6 +29,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 import wandb
+from torch.profiler import profile, ProfilerActivity, schedule
 
 # ### MODIFIED: 引入 accelerate
 from accelerate import Accelerator 
@@ -74,7 +75,9 @@ class EncoderPretrainer:
         accelerator: Accelerator, # ### MODIFIED: 传入 accelerator
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         log_wandb: bool = False,
-        project_name: str = "tomas-encoder-pretrain"
+        project_name: str = "tomas-encoder-pretrain",
+        enable_profiler: bool = False,
+        profiler_output_dir: str = "./profiler_outputs"
     ):
         self.accelerator = accelerator
         self.tokenizer = tokenizer
@@ -118,6 +121,14 @@ class EncoderPretrainer:
         self.criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
         self.best_loss = float('inf')
         self.global_step = 0
+        
+        # Profiler settings
+        self.enable_profiler = enable_profiler
+        self.profiler_output_dir = profiler_output_dir
+        if self.enable_profiler and self.accelerator.is_main_process:
+            os.makedirs(self.profiler_output_dir, exist_ok=True)
+            print(f"\n[Profiler] Enabled - Output directory: {self.profiler_output_dir}")
+            print("[Profiler] Will profile first 5 batches with memory tracking")
     
     def inject_prefix_embeddings(self, encoder_embeddings, input_ids, attention_mask):
         # 逻辑保持不变，Tensor 已经在正确的 device 上
@@ -215,22 +226,85 @@ class EncoderPretrainer:
             pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}")
         else:
             pbar = self.dataloader
+        
+        # Setup profiler if enabled (only on main process and first epoch)
+        profiler_context = None
+        if self.enable_profiler and self.accelerator.is_main_process and epoch == 0:
+            # Profile schedule: wait=1, warmup=1, active=3, repeat=1
+            # This will profile batches 2-4 (skip first for warmup)
+            profiler_schedule = schedule(
+                wait=1,      # Skip first batch
+                warmup=1,    # Warmup on second batch
+                active=3,    # Profile batches 3-5
+                repeat=1     # Only do this once
+            )
             
-        for batch in pbar:
-            metrics = self.train_step(batch)
-            epoch_loss += metrics["loss"]
-            num_batches += 1
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            trace_file = os.path.join(
+                self.profiler_output_dir, 
+                f"profile_epoch{epoch+1}_{timestamp}.json"
+            )
             
-            if self.accelerator.is_main_process:
-                pbar.set_postfix({
-                    "loss": f"{metrics['loss']:.4f}",
-                    "avg_loss": f"{epoch_loss/num_batches:.4f}",
-                    "lr": f"{metrics['lr']:.6f}",
-                    "α": f"{metrics['gate_alpha']:.4f}"
-                })
+            profiler_context = profile(
+                activities=[
+                    ProfilerActivity.CPU,
+                    ProfilerActivity.CUDA,
+                ],
+                schedule=profiler_schedule,
+                on_trace_ready=lambda prof: prof.export_chrome_trace(trace_file),
+                record_shapes=True,      # Record tensor shapes
+                profile_memory=True,     # Track memory allocations (critical for OOM diagnosis)
+                with_stack=True,         # Record stack traces
+                with_flops=False         # Disable FLOPS (can be heavy)
+            )
+            print(f"[Profiler] Starting profiling, trace will be saved to: {trace_file}")
+            print("[Profiler] Profiling batches 2-5 (with warmup)")
+        
+        # Training loop with optional profiling
+        if profiler_context is not None:
+            profiler_context.__enter__()
+            
+        try:
+            for batch_idx, batch in enumerate(pbar):
+                metrics = self.train_step(batch)
+                epoch_loss += metrics["loss"]
+                num_batches += 1
                 
-                if self.log_wandb and self.global_step % 10 == 0:
-                    wandb.log(metrics, step=self.global_step)
+                if self.accelerator.is_main_process:
+                    postfix = {
+                        "loss": f"{metrics['loss']:.4f}",
+                        "avg_loss": f"{epoch_loss/num_batches:.4f}",
+                        "lr": f"{metrics['lr']:.6f}",
+                        "α": f"{metrics['gate_alpha']:.4f}"
+                    }
+                    
+                    # Add memory info during profiling
+                    if profiler_context is not None and batch_idx < 10:
+                        if torch.cuda.is_available():
+                            mem_allocated = torch.cuda.memory_allocated() / 1024**3
+                            mem_reserved = torch.cuda.memory_reserved() / 1024**3
+                            postfix["mem_alloc"] = f"{mem_allocated:.2f}GB"
+                            postfix["mem_rsv"] = f"{mem_reserved:.2f}GB"
+                    
+                    pbar.set_postfix(postfix)
+                    
+                    if self.log_wandb and self.global_step % 10 == 0:
+                        wandb.log(metrics, step=self.global_step)
+                
+                # Step profiler if active
+                if profiler_context is not None:
+                    profiler_context.step()
+                    # Stop profiling after 10 batches to avoid huge files
+                    if batch_idx >= 9:
+                        if self.accelerator.is_main_process:
+                            print("[Profiler] Completed profiling, stopping...")
+                        break
+        finally:
+            if profiler_context is not None:
+                profiler_context.__exit__(None, None, None)
+                if self.accelerator.is_main_process:
+                    print(f"[Profiler] Profile saved successfully")
+                    print(f"[Profiler] View with: chrome://tracing or https://ui.perfetto.dev/")
         
         # Gather metrics across GPUs (optional, mainly for accurate validation loss)
         avg_loss = epoch_loss / num_batches if num_batches > 0 else float('inf')
@@ -301,6 +375,10 @@ def main():
     parser.add_argument("--log_wandb", action="store_true", default=None)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, 
                         help="Path to the .pt checkpoint file to resume from")
+    parser.add_argument("--profile", action="store_true", default=False,
+                        help="Enable torch profiler for performance and memory analysis")
+    parser.add_argument("--profile_output_dir", type=str, default="./profiler_outputs",
+                        help="Directory to save profiler output files")
 
     
     args = parser.parse_args()
@@ -416,7 +494,9 @@ def main():
         accelerator=accelerator, # 传入 accelerator
         scheduler=scheduler,
         log_wandb=logging_cfg['wandb']['enabled'],
-        project_name=logging_cfg['wandb']['project']
+        project_name=logging_cfg['wandb']['project'],
+        enable_profiler=args.profile,
+        profiler_output_dir=args.profile_output_dir
     )
 
     # Resume from checkpoint if specified
