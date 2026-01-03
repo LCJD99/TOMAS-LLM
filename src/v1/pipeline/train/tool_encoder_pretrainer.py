@@ -1,89 +1,86 @@
 """
-Tool Encoder Pre-training 
+Tool Encoder Pre-training with transformers.Trainer
 
+This module refactors the encoder pre-training to use HuggingFace Trainer API.
 """
 
 import argparse
 import os
 import yaml
 from datetime import datetime
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Union
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from tqdm import tqdm
+from transformers import (
+    AutoModelForCausalLM, 
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+    TrainerCallback
+)
 import wandb
-from torch.profiler import profile, ProfilerActivity, schedule
 
 from src.v1.data.tool_encoder_pretrain_dataset import EncoderPretrainDataset
 from src.v1.model.tool_encoder import ResourceEncoderForPretraining
 from src.v1.utils.config import load_config, merge_config_with_args
 
-class ToolEncoderPretrainer:
+
+class ToolEncoderTrainer(Trainer):
+    """
+    Custom Trainer for Tool Encoder pre-training.
+    
+    Extends HuggingFace Trainer to handle:
+    1. Encoder embeddings injection between prefix and suffix tokens
+    2. Frozen LLM backbone with trainable encoder
+    3. Custom loss computation with label masking
+    """
+    
     def __init__(
         self,
         encoder: ResourceEncoderForPretraining,
         llm_model: AutoModelForCausalLM,
         tokenizer: AutoTokenizer,
-        optimizer: torch.optim.Optimizer,
-        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
-        device: str = "cuda",
-        log_wandb: bool = False,
-        project_name: str = "tomas-encoder-pretrain",
-        enable_profiler: bool = False,
-        profiler_output_dir: str = "./profiler_outputs"
+        **kwargs
     ):
-        self.device = device
-        self.tokenizer = tokenizer
-        self.log_wandb = log_wandb
+        """
+        Initialize custom trainer.
         
-        # Move models to device
-        self.encoder = encoder.to(device)
-        self.llm_model = llm_model.to(device)
-        self.optimizer = optimizer
-        self.scheduler = scheduler
+        Args:
+            encoder: The trainable resource encoder
+            llm_model: Frozen LLM backbone (for generating embeddings)
+            tokenizer: Tokenizer for loss computation
+            **kwargs: Arguments passed to base Trainer
+        """
+        # Store encoder and LLM separately
+        self.encoder = encoder
+        self.llm_model = llm_model
+        self.tokenizer = tokenizer
         
         # Freeze LLM parameters
         for param in self.llm_model.parameters():
             param.requires_grad = False
         
-        # Initialize W&B
-        if log_wandb:
-            wandb.init(project=project_name, config={
-                "model": "ResourceEncoderForPretraining",
-                "architecture": "Deep Semantic + Gated Fusion",
-                "llm_backbone": "Qwen2.5-7B",
-                "device": device,
-                "num_tools": self.encoder.num_tools,
-                "hidden_dim": self.encoder.llm_hidden_dim,
-                "gate_alpha_init": self.encoder.get_gate_value(),
-                "trainable_params": sum(p.numel() for p in self.encoder.get_trainable_parameters()),
-                "total_params": sum(p.numel() for p in self.encoder.parameters())
-            })
+        # Move models to device from args
+        device = kwargs.get('args').device
+        self.encoder = self.encoder.to(device)
+        self.llm_model = self.llm_model.to(device)
         
-        self.criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
-        self.best_loss = float('inf')
-        self.global_step = 0
+        # Initialize base Trainer with encoder as the main model
+        # (This allows Trainer to handle optimizer, scheduler, checkpointing, etc.)
+        super().__init__(model=encoder, tokenizer=tokenizer, **kwargs)
         
-        # Profiler settings
-        self.enable_profiler = enable_profiler
-        self.profiler_output_dir = profiler_output_dir
-        if self.enable_profiler:
-            os.makedirs(self.profiler_output_dir, exist_ok=True)
-            print(f"\n[Profiler] Enabled - Output directory: {self.profiler_output_dir}")
-            print("[Profiler] Will profile first 5 batches with memory tracking")
+        # Loss function
+        self.criterion = nn.CrossEntropyLoss(ignore_index=-100)
     
     def inject_encoder_embedding(
         self, 
-        encoder_embeddings, 
-        prefix_input_ids, 
-        prefix_attention_mask,
-        suffix_input_ids,
-        suffix_attention_mask
+        encoder_embeddings: torch.Tensor, 
+        prefix_input_ids: torch.Tensor, 
+        prefix_attention_mask: torch.Tensor,
+        suffix_input_ids: torch.Tensor,
+        suffix_attention_mask: torch.Tensor
     ):
         """
         Inject encoder embeddings between prefix and suffix token sequences.
@@ -116,7 +113,6 @@ class ToolEncoderPretrainer:
         # Expand encoder embeddings to [B, 1, D]
         encoder_embeddings_expanded = encoder_embeddings.unsqueeze(1)  # [B, 1, D]
         
-        breakpoint()
         # Concatenate: prefix + encoder + suffix
         combined_embeddings = torch.cat([
             prefix_token_embeddings,
@@ -138,24 +134,32 @@ class ToolEncoderPretrainer:
         
         return combined_embeddings, combined_attention_mask
     
-    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        self.encoder.train()
-        self.llm_model.eval()
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """
+        Custom loss computation for encoder pre-training.
         
-        # Move batch to device and extract data
-        tool_ids = batch["tool_id"].to(self.device)
-        resource_vectors = batch["resource_vector"].to(self.device)
-        prefix_input_ids = batch["prefix_input_ids"].to(self.device)
-        prefix_attention_mask = batch["prefix_attention_mask"].to(self.device)
-        suffix_input_ids = batch["suffix_input_ids"].to(self.device)
-        suffix_attention_mask = batch["suffix_attention_mask"].to(self.device)
-        prefix_labels = batch["prefix_labels"].to(self.device)
-        suffix_labels = batch["suffix_labels"].to(self.device)
+        Args:
+            model: The encoder model (automatically passed by Trainer)
+            inputs: Batch dictionary from dataset
+            return_outputs: Whether to return model outputs
+            
+        Returns:
+            loss or (loss, outputs) tuple
+        """
+        # Extract inputs
+        tool_ids = inputs["tool_id"]
+        resource_vectors = inputs["resource_vector"]
+        prefix_input_ids = inputs["prefix_input_ids"]
+        prefix_attention_mask = inputs["prefix_attention_mask"]
+        suffix_input_ids = inputs["suffix_input_ids"]
+        suffix_attention_mask = inputs["suffix_attention_mask"]
+        prefix_labels = inputs["prefix_labels"]
+        suffix_labels = inputs["suffix_labels"]
         
-        # Get encoder embeddings
-        encoder_embeddings = self.encoder(tool_ids, resource_vectors)
+        # Get encoder embeddings (model is self.encoder)
+        encoder_embeddings = model(tool_ids, resource_vectors)
         
-        # Ensure encoder embeddings match LLM dtype (critical for mixed precision)
+        # Ensure encoder embeddings match LLM dtype
         llm_dtype = next(self.llm_model.parameters()).dtype
         encoder_embeddings = encoder_embeddings.to(llm_dtype)
         
@@ -168,13 +172,14 @@ class ToolEncoderPretrainer:
             suffix_attention_mask
         )
         
-        # Forward through LLM
-        outputs = self.llm_model(
-            inputs_embeds=combined_embeddings,
-            attention_mask=combined_attention_mask,
-            return_dict=True
-        )
-
+        # Forward through LLM (frozen)
+        with torch.no_grad():
+            outputs = self.llm_model(
+                inputs_embeds=combined_embeddings,
+                attention_mask=combined_attention_mask,
+                return_dict=True
+            )
+        
         # Combine labels: [prefix_labels] + [-100 for encoder] + [suffix_labels]
         batch_size = tool_ids.size(0)
         encoder_label = torch.full(
@@ -186,206 +191,53 @@ class ToolEncoderPretrainer:
             prefix_labels,
             encoder_label,
             suffix_labels
-        ], dim=1)  # [B, L_pre + 1 + L_suf]
+        ], dim=1)
         
         # Shift logits and labels for causal LM
-        # outputs.logits: [B, L_pre + 1 + L_suf, V]
-        # We want to predict: [tok_0, tok_1, ..., tok_{L-1}]
-        shift_logits = outputs.logits[:, :-1, :].contiguous()  # [B, L-1, V]
-        shift_labels = combined_labels[:, 1:].contiguous()  # [B, L-1]
+        shift_logits = outputs.logits[:, :-1, :].contiguous()
+        shift_labels = combined_labels[:, 1:].contiguous()
         
-        # # Debug: Check for invalid label values
-        # vocab_size = shift_logits.size(-1)
-        # invalid_labels = shift_labels[(shift_labels >= vocab_size) & (shift_labels != -100)]
-        # if len(invalid_labels) > 0:
-        #     print(f"ERROR: Found {len(invalid_labels)} labels >= vocab_size ({vocab_size})")
-        #     print(f"Invalid labels: {invalid_labels[:10]}")  # Show first 10
-        #     print(f"Max label value: {shift_labels[shift_labels != -100].max().item()}")
-        #     print(f"Vocab size: {vocab_size}")
-        #     # Clamp invalid labels to -100 to prevent crash
-        #     shift_labels = torch.where(
-        #         (shift_labels >= vocab_size) | (shift_labels < -100),
-        #         torch.tensor(-100, dtype=shift_labels.dtype, device=shift_labels.device),
-        #         shift_labels
-        #     )
-        
-        # Compute loss (only on non -100 labels, i.e., assistant response)
+        # Compute loss
         loss = self.criterion(
             shift_logits.reshape(-1, shift_logits.size(-1)),
             shift_labels.reshape(-1)
         )
         
-        self.optimizer.zero_grad()
-        loss.backward()
-        
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), max_norm=1.0)
-        
-        self.optimizer.step()
-        if self.scheduler is not None:
-            self.scheduler.step()
-        
-        self.global_step += 1
-        
-        # Get gate_alpha value for monitoring
-        gate_alpha = self.encoder.get_gate_value()
-        
-        return {
-            "loss": loss.item(),
-            "lr": self.optimizer.param_groups[0]["lr"],
-            "gate_alpha": gate_alpha,
-            "global_step": self.global_step
-        }
+        return (loss, outputs) if return_outputs else loss
 
-    def train_epoch(self, epoch: int, dataloader: DataLoader) -> Dict[str, float]:
-        epoch_loss = 0.0
-        num_batches = 0
-        
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
-        
-        # Setup profiler if enabled (first epoch only)
-        profiler_context = None
-        if self.enable_profiler and epoch == 0:
-            # Profile schedule: wait=1, warmup=1, active=3, repeat=1
-            # This will profile batches 2-4 (skip first for warmup)
-            profiler_schedule = schedule(
-                wait=1,      # Skip first batch
-                warmup=1,    # Warmup on second batch
-                active=3,    # Profile batches 3-5
-                repeat=1     # Only do this once
-            )
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            trace_file = os.path.join(
-                self.profiler_output_dir, 
-                f"profile_epoch{epoch+1}_{timestamp}.json"
-            )
-            
-            profiler_context = profile(
-                activities=[
-                    ProfilerActivity.CPU,
-                    ProfilerActivity.CUDA,
-                ],
-                schedule=profiler_schedule,
-                on_trace_ready=lambda prof: prof.export_chrome_trace(trace_file),
-                record_shapes=True,      # Record tensor shapes
-                profile_memory=True,     # Track memory allocations (critical for OOM diagnosis)
-                with_stack=True,         # Record stack traces
-                with_flops=False         # Disable FLOPS (can be heavy)
-            )
-            print(f"[Profiler] Starting profiling, trace will be saved to: {trace_file}")
-            print("[Profiler] Profiling batches 2-5 (with warmup)")
-        
-        # Training loop with optional profiling
-        if profiler_context is not None:
-            profiler_context.__enter__()
-            
-        try:
-            for batch_idx, batch in enumerate(pbar):
-                metrics = self.train_step(batch)
-                epoch_loss += metrics["loss"]
-                num_batches += 1
-                
-                postfix = {
-                    "loss": f"{metrics['loss']:.4f}",
-                    "avg_loss": f"{epoch_loss/num_batches:.4f}",
-                    "lr": f"{metrics['lr']:.6f}",
-                    "α": f"{metrics['gate_alpha']:.4f}"
-                }
-                
-                # Add memory info during profiling
-                if profiler_context is not None and batch_idx < 10:
-                    if torch.cuda.is_available():
-                        mem_allocated = torch.cuda.memory_allocated() / 1024**3
-                        mem_reserved = torch.cuda.memory_reserved() / 1024**3
-                        postfix["mem_alloc"] = f"{mem_allocated:.2f}GB"
-                        postfix["mem_rsv"] = f"{mem_reserved:.2f}GB"
-                
-                pbar.set_postfix(postfix)
-                
-                if self.log_wandb and self.global_step % 10 == 0:
-                    wandb.log(metrics, step=self.global_step)
-                
-                # Step profiler if active
-                if profiler_context is not None:
-                    profiler_context.step()
-                    # Stop profiling after 10 batches to avoid huge files
-                    if batch_idx >= 9:
-                        print("[Profiler] Completed profiling, stopping...")
-                        break
-        finally:
-            if profiler_context is not None:
-                profiler_context.__exit__(None, None, None)
-                print(f"[Profiler] Profile saved successfully")
-                print(f"[Profiler] View with: chrome://tracing or https://ui.perfetto.dev/")
-        
-        avg_loss = epoch_loss / num_batches if num_batches > 0 else float('inf')
-        return {"train_loss": avg_loss, "epoch": epoch}
 
-    def save_checkpoint(self, save_path: str, epoch: int, metrics: Dict):
-        checkpoint = {
-            "epoch": epoch,
-            "encoder_state_dict": self.encoder.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "metrics": metrics,
-            "global_step": self.global_step,
-            "best_loss": self.best_loss
-        }
-        if self.scheduler is not None:
-            checkpoint["scheduler_state_dict"] = self.scheduler.state_dict()
-        
-        torch.save(checkpoint, save_path)
-        print(f"Checkpoint saved to {save_path}")
+class GateAlphaCallback(TrainerCallback):
+    """Callback to log gate_alpha value during training."""
     
-    def load_checkpoint(self, load_path: str) -> int:
-        """Load checkpoint and return the epoch number."""
-        checkpoint = torch.load(load_path, map_location=self.device)
-        
-        # Load model state
-        self.encoder.load_state_dict(checkpoint["encoder_state_dict"])
-        
-        # Load optimizer state
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        
-        # Load scheduler state if available
-        if self.scheduler is not None and "scheduler_state_dict" in checkpoint:
-            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        
-        # Load training state
-        self.global_step = checkpoint.get("global_step", 0)
-        self.best_loss = checkpoint.get("best_loss", float('inf'))
-        epoch = checkpoint.get("epoch", 0)
-        
-        print(f"Checkpoint loaded from {load_path}")
-        print(f"  - Resuming from epoch {epoch + 1}")
-        print(f"  - Global step: {self.global_step}")
-        print(f"  - Best loss: {self.best_loss:.4f}")
-        
-        return epoch
+    def on_log(self, args, state, control, model=None, logs=None, **kwargs):
+        """Log gate_alpha value to wandb/tensorboard."""
+        if model is not None and hasattr(model, 'get_gate_value'):
+            gate_alpha = model.get_gate_value()
+            logs['gate_alpha'] = gate_alpha
+
 
 
 def train_tool_encoder(args: argparse.Namespace):
+    """
+    Main training function using transformers.Trainer.
+    """
     config = load_config(args.config)
     config = merge_config_with_args(config, args)
     
-    # 获取配置
+    # Get configurations
     data_cfg = config['data']
     model_cfg = config['model']
     train_cfg = config['training']
-    dataloader_cfg = config['dataloader']
     output_cfg = config['output']
     logging_cfg = config['logging']
     
-    # Get device
-    device = train_cfg.get('device', args.device)
-    if device == 'cuda' and not torch.cuda.is_available():
-        print("Warning: CUDA not available, using CPU")
-        device = 'cpu'
-    
+    # Setup output directory
     os.makedirs(output_cfg['output_dir'], exist_ok=True)
 
-    # 1. Load dataset
-    print("\n[1/5] Loading dataset...")
+    # ========================================
+    # 1. Load Dataset
+    # ========================================
+    print("\n[1/4] Loading dataset...")
     
     torch.manual_seed(data_cfg['augmentation']['seed'])
     if torch.cuda.is_available():
@@ -401,18 +253,14 @@ def train_tool_encoder(args: argparse.Namespace):
         seed=data_cfg['augmentation']['seed']
     )
     
-    # Create dataloader
-    dataloader = DataLoader(
-        dataset,
-        batch_size=train_cfg['batch_size'],
-        shuffle=dataloader_cfg['shuffle'],
-        num_workers=dataloader_cfg['num_workers'],
-        pin_memory=True
-    )
+    print(f"  ✓ Dataset size: {len(dataset)} samples")
     
-    # 2. Initialize encoder 
-    print("\n[2/5] Initializing encoder (with deep semantic encoding)...")
-        
+    # ========================================
+    # 2. Initialize Models
+    # ========================================
+    print("\n[2/4] Initializing models...")
+    
+    # Initialize encoder
     encoder = ResourceEncoderForPretraining(
         llm_model_name=model_cfg['llm_model'],
         tool_registry_path=data_cfg['tool_registry'],
@@ -422,92 +270,135 @@ def train_tool_encoder(args: argparse.Namespace):
         cache_dir=model_cfg.get('cache_dir', 'hub')
     )
     
-    print(f"  ✓ Loaded {encoder.num_tools} tools")
+    print(f"  ✓ Encoder loaded: {encoder.num_tools} tools")
     print(f"  ✓ Hidden dimension: {encoder.llm_hidden_dim}")
-    print(f"  ✓ Gate alpha initialized to: {encoder.get_gate_value():.6f}")
+    print(f"  ✓ Gate alpha: {encoder.get_gate_value():.6f}")
+    print(f"  ✓ Trainable params: {sum(p.numel() for p in encoder.get_trainable_parameters()):,}")
     
-    # 3. Load LLM
-    print("\n[3/5] Loading LLM backbone...")
-    
-    llm_load_kwargs = {
-        "trust_remote_code": True,
-        "torch_dtype": torch.bfloat16
-    }
-    
+    # Load LLM backbone
     llm_model = AutoModelForCausalLM.from_pretrained(
         model_cfg['llm_model'],
-        **llm_load_kwargs
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16
     )
     
-    # 4. Optimizer
-    print("\n[4/5] Setting up optimizer and scheduler...")
-    optimizer = AdamW(
-        encoder.get_trainable_parameters(),
-        lr=train_cfg['learning_rate'],
-        weight_decay=train_cfg['weight_decay']
-    )
+    print(f"  ✓ LLM backbone loaded (frozen)")
     
-    if train_cfg['scheduler']['type'] == 'cosine':
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=train_cfg['num_epochs'] * len(dataloader),
-            eta_min=train_cfg['learning_rate'] * train_cfg['scheduler']['eta_min_ratio']
-        )
-    else:
-        scheduler = None
+    # ========================================
+    # 3. Setup Training Arguments
+    # ========================================
+    print("\n[3/4] Configuring training arguments...")
+    
+    # Get device preference
+    device = train_cfg.get('device', args.device)
+    if device == 'cuda' and not torch.cuda.is_available():
+        print("Warning: CUDA not available, using CPU")
+        device = 'cpu'
+    
+    training_args = TrainingArguments(
+        output_dir=output_cfg['output_dir'],
         
-    # 5. Initialize Trainer
-    trainer = ToolEncoderPretrainer(
+        # Training hyperparameters
+        num_train_epochs=train_cfg['num_epochs'],
+        per_device_train_batch_size=train_cfg['batch_size'],
+        learning_rate=train_cfg['learning_rate'],
+        weight_decay=train_cfg['weight_decay'],
+        
+        # Optimization
+        lr_scheduler_type=train_cfg['scheduler']['type'],
+        warmup_ratio=train_cfg['scheduler'].get('warmup_ratio', 0.0),
+        max_grad_norm=1.0,
+        
+        # Mixed precision
+        bf16=True if device == 'cuda' and torch.cuda.is_available() else False,
+        
+        # Logging
+        logging_dir=os.path.join(output_cfg['output_dir'], 'logs'),
+        logging_steps=10,
+        logging_strategy='steps',
+        
+        # Checkpointing
+        save_strategy='epoch',
+        save_total_limit=3,
+        load_best_model_at_end=False,
+        
+        # Evaluation (disabled for now)
+        evaluation_strategy='no',
+        
+        # Other settings
+        dataloader_num_workers=config['dataloader']['num_workers'],
+        remove_unused_columns=False,  # Important: keep all dataset columns
+        report_to='wandb' if logging_cfg['wandb']['enabled'] else 'none',
+        run_name=f"encoder_pretrain_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        
+        # Device
+        no_cuda=(device == 'cpu'),
+    )
+    
+    # ========================================
+    # 4. Initialize Trainer
+    # ========================================
+    print("\n[4/4] Initializing trainer...")
+    
+    # Initialize W&B if enabled
+    if logging_cfg['wandb']['enabled']:
+        wandb.init(
+            project=logging_cfg['wandb']['project'],
+            config={
+                "model": "ResourceEncoderForPretraining",
+                "architecture": "Deep Semantic + Gated Fusion",
+                "llm_backbone": model_cfg['llm_model'],
+                "num_tools": encoder.num_tools,
+                "hidden_dim": encoder.llm_hidden_dim,
+                "gate_alpha_init": encoder.get_gate_value(),
+                "trainable_params": sum(p.numel() for p in encoder.get_trainable_parameters()),
+                "total_params": sum(p.numel() for p in encoder.parameters()),
+                **train_cfg
+            }
+        )
+    
+    trainer = ToolEncoderTrainer(
         encoder=encoder,
         llm_model=llm_model,
         tokenizer=dataset.tokenizer,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        device=device,
-        log_wandb=logging_cfg['wandb']['enabled'],
-        project_name=logging_cfg['wandb']['project'],
-        enable_profiler=args.profile,
-        profiler_output_dir=args.profile_output_dir
+        args=training_args,
+        train_dataset=dataset,
+        callbacks=[GateAlphaCallback()],
     )
-
+    
+    # ========================================
+    # 5. Training
+    # ========================================
+    print("\n" + "="*60)
+    print("Starting Training")
+    print("="*60)
+    
     # Resume from checkpoint if specified
-    start_epoch = 0
+    resume_from_checkpoint = None
     if args.resume_from_checkpoint:
-        if os.path.isfile(args.resume_from_checkpoint):
-            print(f"\n[Resume] Loading checkpoint: {args.resume_from_checkpoint}")
-            saved_epoch = trainer.load_checkpoint(args.resume_from_checkpoint)
-            # Start from the next epoch after the saved one
-            start_epoch = saved_epoch + 1
+        if os.path.isdir(args.resume_from_checkpoint):
+            resume_from_checkpoint = args.resume_from_checkpoint
+            print(f"Resuming from checkpoint: {resume_from_checkpoint}")
         else:
-            print(f"Warning: Checkpoint {args.resume_from_checkpoint} not found. Starting from scratch.")
-
-    # Training Loop
-    for epoch in range(start_epoch, train_cfg['num_epochs']):
-        epoch_metrics = trainer.train_epoch(epoch, dataloader)
-        train_loss = epoch_metrics["train_loss"]
-        
-        # Get current gate_alpha value
-        gate_alpha = trainer.encoder.get_gate_value()
-        
-        print(f"\nEpoch {epoch+1}/{train_cfg['num_epochs']} - Train Loss: {train_loss:.4f} - Gate α: {gate_alpha:.4f}")
-        
-        # Save periodic checkpoint
-        if (epoch + 1) % output_cfg['checkpoint_freq'] == 0:
-            checkpoint_path = os.path.join(
-                output_cfg['output_dir'],
-                f"{output_cfg['checkpoint_prefix']}_epoch{epoch+1}.pt"
-            )
-            trainer.save_checkpoint(checkpoint_path, epoch, epoch_metrics)
-        
-        # Save best model
-        if train_loss < trainer.best_loss:
-            trainer.best_loss = train_loss
-            best_model_path = os.path.join(
-                output_cfg['output_dir'], 
-                output_cfg['best_model_name']
-            )
-            trainer.save_checkpoint(best_model_path, epoch, epoch_metrics)
-            print(f"  ✓ New best model saved (loss: {train_loss:.4f})")
-
+            print(f"Warning: Checkpoint {args.resume_from_checkpoint} not found")
+    
+    # Train!
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    
+    # ========================================
+    # 6. Save Final Model
+    # ========================================
+    print("\n" + "="*60)
+    print("Training Complete - Saving final model")
+    print("="*60)
+    
+    final_model_path = os.path.join(output_cfg['output_dir'], 'final_model')
+    trainer.save_model(final_model_path)
+    print(f"Final model saved to: {final_model_path}")
+    
+    # Cleanup W&B
     if logging_cfg['wandb']['enabled']:
         wandb.finish()
+    
+    print("\n✓ Training completed successfully!")
+
