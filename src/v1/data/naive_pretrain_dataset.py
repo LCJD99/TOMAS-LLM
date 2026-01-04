@@ -250,7 +250,7 @@ def test_dataset():
     dataset = NaivePretrainDataset(
         data_path=str(data_path),
         tokenizer=tokenizer,
-        max_length=512
+        max_length=64
     )
     
     # Test a few examples

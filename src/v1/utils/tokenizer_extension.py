@@ -209,7 +209,7 @@ def main():
     output_path = project_root / "data" / "generated" / "extended_tokenizer"
     
     # Base model name
-    base_model_name = "Qwen/Qwen2.5-7B"
+    base_model_name = "Qwen2.5-7B"
     cache_dir = str(project_root / "hub")
     
     logger.info("=" * 80)
