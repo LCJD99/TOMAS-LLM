@@ -26,7 +26,7 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 
 from ...model.tool_encoder import NaiveEncoderForPretraining
-from ...data.naive_pretrain_dataset import NaivePretrainDataset
+from ...data.naive_pretrain_dataset import NaivePretrainDataset, collate_fn
 from ...utils.checkpoint_utils import (
     save_new_parameters,
     load_new_parameters,
@@ -220,8 +220,8 @@ class NaiveEncoderPretrainer:
             model=self.model.llm_model,  # Pass the underlying LLM model
             args=training_args,
             train_dataset=self.dataset,
-            data_collator=self.dataset.collate_fn,
         )
+            # data_collator=collate_fn
         
         # Add custom callback to save new parameters
         new_params_callback = NewParamsSaveCallback(

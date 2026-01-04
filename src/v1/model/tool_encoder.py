@@ -644,7 +644,7 @@ class NaiveEncoderForPretraining(nn.Module):
             extended_tokenizer_path = "data/generated/extended_tokenizer"
         
         logger.info(f"Loading extended tokenizer from: {extended_tokenizer_path}")
-        self.tokenizer = AutoTokenizer.from_pretrained(extended_tokenizer_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
         
         # Load combined tokens metadata
         if combined_tokens_path is None:
@@ -690,6 +690,7 @@ class NaiveEncoderForPretraining(nn.Module):
         
         # Initialize new token embeddings
         new_embeddings_init = []
+        breakpoint()
         for combined_token in self.combined_tokens:
             # Tokenize the combined token using the original vocabulary
             token_ids = self.tokenizer.encode(
