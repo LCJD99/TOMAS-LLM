@@ -591,6 +591,494 @@ class ResourceEncoderForPretraining(nn.Module):
         """Get current gate parameter value from fusion module."""
         return self.fusion.get_gate_value()
 
+class NaiveEncoderForPretraining(nn.Module):
+    """
+    Naive encoder that extends LLM vocabulary with tool configuration tokens.
+    
+    Architecture:
+    - Base LLM: Qwen2.5-7B (frozen, unchanged)
+    - New Token Embeddings: Separate embedding layer for new tokens
+    - New Token LM Head: Separate lm_head for new tokens
+    
+    Training Strategy:
+    - Keep base LLM completely frozen and unmodified
+    - Only train new token embeddings and lm_head modules
+    - Combine outputs via concatenation
+    """
+    
+    def __init__(
+        self,
+        llm_model_name: str = "Qwen2.5-7B",
+        extended_tokenizer_path: Optional[str] = None,
+        combined_tokens_path: Optional[str] = None,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    ):
+        """
+        Initialize the NaiveEncoderForPretraining model.
+        
+        Args:
+            llm_model_name: Name or path of the base LLM model
+            extended_tokenizer_path: Path to the extended tokenizer directory
+            combined_tokens_path: Path to the combined_tokens.json file
+            device: Device to load the model on
+        """
+        super().__init__()
+        
+        self.device = device
+        self.llm_model_name = llm_model_name
+        
+        # Load the base LLM model (keep frozen and unmodified)
+        logger.info(f"Loading base LLM model: {llm_model_name}")
+        self.llm_model = AutoModelForCausalLM.from_pretrained(
+            llm_model_name,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            device_map="auto" if device == "cuda" else None,
+        )
+        
+        # Freeze all base model parameters
+        for param in self.llm_model.parameters():
+            param.requires_grad = False
+        
+        # Load extended tokenizer
+        if extended_tokenizer_path is None:
+            extended_tokenizer_path = "data/generated/extended_tokenizer"
+        
+        logger.info(f"Loading extended tokenizer from: {extended_tokenizer_path}")
+        self.tokenizer = AutoTokenizer.from_pretrained(extended_tokenizer_path)
+        
+        # Load combined tokens metadata
+        if combined_tokens_path is None:
+            combined_tokens_path = "data/generated/combined_tokens.json"
+        
+        logger.info(f"Loading combined tokens from: {combined_tokens_path}")
+        with open(combined_tokens_path, "r") as f:
+            token_data = json.load(f)
+            self.combined_tokens = token_data["tokens"]
+            self.num_new_tokens = token_data["num_new_tokens"]
+        
+        # Record vocabulary sizes
+        self.original_vocab_size = self.llm_model.config.vocab_size
+        self.extended_vocab_size = self.original_vocab_size + self.num_new_tokens
+        
+        logger.info(f"Original vocabulary size: {self.original_vocab_size}")
+        logger.info(f"Extended vocabulary size: {self.extended_vocab_size}")
+        logger.info(f"Number of new tokens: {self.num_new_tokens}")
+        
+        # Get hidden dimension from base model
+        self.hidden_dim = self.llm_model.config.hidden_size
+        
+        # Create separate modules for new tokens
+        self._create_new_token_modules()
+        
+        # Log trainable parameters
+        self._log_trainable_parameters()
+    
+    def _create_new_token_modules(self):
+        """
+        Create separate embedding and lm_head modules for new tokens.
+        
+        Strategy:
+        - Create embedding layer with num_new_tokens rows
+        - Initialize from constituent token embeddings (warm start)
+        - Create lm_head layer for new tokens
+        """
+        logger.info("Creating new token modules...")
+        
+        # Get original embedding layer for initialization
+        original_embeddings = self.llm_model.get_input_embeddings()
+        original_embedding_weight = original_embeddings.weight.data
+        
+        # Initialize new token embeddings
+        new_embeddings_init = []
+        for combined_token in self.combined_tokens:
+            # Tokenize the combined token using the original vocabulary
+            token_ids = self.tokenizer.encode(
+                combined_token,
+                add_special_tokens=False,
+            )
+            
+            # Get embeddings for constituent tokens
+            constituent_embeddings = original_embedding_weight[token_ids]
+            
+            # Initialize as mean of constituent embeddings
+            new_embedding = constituent_embeddings.mean(dim=0)
+            new_embeddings_init.append(new_embedding)
+        
+        # Stack into initialization tensor
+        new_embeddings_init = torch.stack(new_embeddings_init, dim=0)  # [num_new_tokens, hidden_dim]
+        
+        # Create new token embedding layer
+        self.new_token_embeddings = nn.Embedding(
+            num_embeddings=self.num_new_tokens,
+            embedding_dim=self.hidden_dim,
+        )
+        # Initialize with computed values
+        self.new_token_embeddings.weight.data = new_embeddings_init.to(self.new_token_embeddings.weight.device)
+        
+        # Create new token lm_head
+        self.new_token_lm_head = nn.Linear(
+            self.hidden_dim,
+            self.num_new_tokens,
+            bias=self.llm_model.lm_head.bias is not None,
+        )
+        # Initialize from new embeddings (weight tying)
+        self.new_token_lm_head.weight.data = new_embeddings_init.clone().to(self.new_token_lm_head.weight.device)
+        if self.new_token_lm_head.bias is not None:
+            nn.init.zeros_(self.new_token_lm_head.bias)
+        
+        logger.info(f"New token embedding created: {self.new_token_embeddings.weight.shape}")
+        logger.info(f"New token lm_head created: {self.new_token_lm_head.weight.shape}")
+    
+    def _log_trainable_parameters(self):
+        """
+        Log the number of trainable parameters in the model.
+        """
+        # Base model parameters (all frozen)
+        base_params = sum(p.numel() for p in self.llm_model.parameters())
+        
+        # New token module parameters (all trainable)
+        new_emb_params = sum(p.numel() for p in self.new_token_embeddings.parameters())
+        new_lm_params = sum(p.numel() for p in self.new_token_lm_head.parameters())
+        trainable_params = new_emb_params + new_lm_params
+        
+        total_params = base_params + trainable_params
+        
+        logger.info(f"Base LLM parameters (frozen): {base_params:,}")
+        logger.info(f"New token embeddings: {new_emb_params:,}")
+        logger.info(f"New token lm_head: {new_lm_params:,}")
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info(f"Trainable parameters: {trainable_params:,}")
+        logger.info(f"Trainable ratio: {trainable_params / total_params * 100:.4f}%")
+    
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        **kwargs,
+    ):
+        """
+        Forward pass through the model.
+        
+        Strategy:
+        - Separate input_ids into original tokens and new tokens
+        - Process original tokens through base LLM
+        - Process new tokens through new token embeddings
+        - Combine embeddings and pass through transformer
+        - Combine logits from base lm_head and new token lm_head
+        
+        Args:
+            input_ids: Input token IDs [batch_size, seq_len]
+            attention_mask: Attention mask [batch_size, seq_len]
+            labels: Target token IDs for language modeling [batch_size, seq_len]
+                   Use -100 for tokens that should not contribute to loss
+            **kwargs: Additional arguments passed to the LLM model
+        
+        Returns:
+            ModelOutput containing loss, logits, etc.
+        """
+        batch_size, seq_len = input_ids.shape
+        
+        # Create mask for new tokens
+        new_token_mask = input_ids >= self.original_vocab_size  # [batch_size, seq_len]
+        
+        # Get embeddings
+        # For original tokens: use base model embeddings
+        # For new tokens: use new token embeddings
+        base_embeddings = self.llm_model.get_input_embeddings()
+        
+        # Initialize combined embeddings
+        combined_embeds = torch.zeros(
+            batch_size, seq_len, self.hidden_dim,
+            dtype=base_embeddings.weight.dtype,
+            device=input_ids.device
+        )
+        
+        # Get original token embeddings (clamp to avoid index errors)
+        original_input_ids = torch.clamp(input_ids, max=self.original_vocab_size - 1)
+        original_embeds = base_embeddings(original_input_ids)
+        
+        # Get new token embeddings
+        new_token_indices = input_ids - self.original_vocab_size  # Offset to 0-based indexing
+        new_token_indices = torch.clamp(new_token_indices, min=0)  # Avoid negative indices
+        new_embeds = self.new_token_embeddings(new_token_indices)
+        
+        # Combine embeddings based on mask
+        combined_embeds = torch.where(
+            new_token_mask.unsqueeze(-1),
+            new_embeds,
+            original_embeds
+        )
+        
+        # Pass through transformer (without lm_head)
+        outputs = self.llm_model(
+            inputs_embeds=combined_embeds,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            **kwargs,
+        )
+        
+        hidden_states = outputs.hidden_states[-1]  # [batch_size, seq_len, hidden_dim]
+        
+        # Get logits from both heads and concatenate
+        base_logits = self.llm_model.lm_head(hidden_states)  # [batch_size, seq_len, original_vocab_size]
+        new_logits = self.new_token_lm_head(hidden_states)   # [batch_size, seq_len, num_new_tokens]
+        
+        # Concatenate logits
+        logits = torch.cat([base_logits, new_logits], dim=-1)  # [batch_size, seq_len, extended_vocab_size]
+        
+        # Calculate loss if labels provided
+        loss = None
+        if labels is not None:
+            # Shift logits and labels for next-token prediction
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
+            # Flatten for loss calculation
+            loss_fct = nn.CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.extended_vocab_size)
+            shift_labels = shift_labels.view(-1)
+            
+            loss = loss_fct(shift_logits, shift_labels)
+        
+        # Return in HuggingFace format
+        from transformers.modeling_outputs import CausalLMOutputWithPast
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=None,
+            hidden_states=outputs.hidden_states if kwargs.get("output_hidden_states") else None,
+            attentions=outputs.attentions if kwargs.get("output_attentions") else None,
+        )
+    
+    def generate(self, input_ids: torch.Tensor, **kwargs):
+        """
+        Generate text using the model.
+        
+        Args:
+            input_ids: Input token IDs [batch_size, seq_len]
+            **kwargs: Additional arguments passed to the generate method
+        
+        Returns:
+            Generated token IDs
+        """
+        # Override the forward method temporarily for generation
+        original_forward = self.llm_model.forward
+        
+        def custom_forward(input_ids=None, attention_mask=None, inputs_embeds=None, **gen_kwargs):
+            if inputs_embeds is None:
+                # Get embeddings using our custom logic
+                batch_size, seq_len = input_ids.shape
+                new_token_mask = input_ids >= self.original_vocab_size
+                
+                base_embeddings = self.llm_model.get_input_embeddings()
+                combined_embeds = torch.zeros(
+                    batch_size, seq_len, self.hidden_dim,
+                    dtype=base_embeddings.weight.dtype,
+                    device=input_ids.device
+                )
+                
+                original_input_ids = torch.clamp(input_ids, max=self.original_vocab_size - 1)
+                original_embeds = base_embeddings(original_input_ids)
+                
+                new_token_indices = input_ids - self.original_vocab_size
+                new_token_indices = torch.clamp(new_token_indices, min=0)
+                new_embeds = self.new_token_embeddings(new_token_indices)
+                
+                inputs_embeds = torch.where(
+                    new_token_mask.unsqueeze(-1),
+                    new_embeds,
+                    original_embeds
+                )
+            
+            # Forward through transformer
+            outputs = original_forward(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                **gen_kwargs
+            )
+            
+            # Combine logits
+            hidden_states = outputs.hidden_states[-1]
+            base_logits = self.llm_model.lm_head(hidden_states)
+            new_logits = self.new_token_lm_head(hidden_states)
+            outputs.logits = torch.cat([base_logits, new_logits], dim=-1)
+            
+            return outputs
+        
+        # Temporarily replace forward
+        self.llm_model.forward = custom_forward
+        
+        try:
+            generated = self.llm_model.generate(input_ids=input_ids, **kwargs)
+        finally:
+            # Restore original forward
+            self.llm_model.forward = original_forward
+        
+        return generated
+    
+    def save_new_parameters(self, save_path: str):
+        """
+        Save only the new parameters (embeddings and LM head extensions).
+        This creates a lightweight checkpoint.
+        
+        Args:
+            save_path: Path to save the new parameters
+        """
+        import os
+        logger.info(f"Saving new parameters to: {save_path}")
+        
+        # Save new token modules
+        new_params = {
+            "new_token_embeddings": self.new_token_embeddings.state_dict(),
+            "new_token_lm_head": self.new_token_lm_head.state_dict(),
+            "num_new_tokens": self.num_new_tokens,
+            "original_vocab_size": self.original_vocab_size,
+            "hidden_dim": self.hidden_dim,
+        }
+        
+        # Create directory if needed
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        # Save
+        torch.save(new_params, save_path)
+        
+        # Log file size
+        file_size_mb = os.path.getsize(save_path) / 1024 / 1024
+        logger.info(f"Saved new parameters: {file_size_mb:.2f} MB")
+    
+    def load_new_parameters(self, load_path: str):
+        """
+        Load previously saved new parameters.
+        
+        Args:
+            load_path: Path to the saved new parameters
+        """
+        logger.info(f"Loading new parameters from: {load_path}")
+        
+        # Load checkpoint
+        checkpoint = torch.load(load_path, map_location=self.device)
+        
+        # Verify compatibility
+        assert checkpoint["num_new_tokens"] == self.num_new_tokens, \
+            f"Token count mismatch: {checkpoint['num_new_tokens']} vs {self.num_new_tokens}"
+        assert checkpoint["original_vocab_size"] == self.original_vocab_size, \
+            f"Vocab size mismatch: {checkpoint['original_vocab_size']} vs {self.original_vocab_size}"
+        
+        # Load module states
+        self.new_token_embeddings.load_state_dict(checkpoint["new_token_embeddings"])
+        self.new_token_lm_head.load_state_dict(checkpoint["new_token_lm_head"])
+        
+        logger.info("Successfully loaded new parameters")
+    
+
+
+
+def test_naive_pretrain_encoder():
+    """Test the NaiveEncoderForPretraining implementation."""
+    print("=" * 80)
+    print("Testing NaiveEncoderForPretraining")
+    print("=" * 80)
+    print()
+    
+    # Initialize model
+    print("Initializing NaiveEncoderForPretraining...")
+    encoder = NaiveEncoderForPretraining(
+        llm_model_name="Qwen/Qwen2.5-7B",
+        extended_tokenizer_path="data/generated/extended_tokenizer",
+        combined_tokens_path="data/generated/combined_tokens.json",
+        device="cpu",  # Use CPU for testing
+    )
+    print()
+    
+    # Test tokenization
+    print("=" * 80)
+    print("Test 1: Tokenization")
+    print("=" * 80)
+    
+    test_prompt = "This is the image_classification tool with small input size. It uses 2 CPU cores, 4 GB CPU memory, 20 GPU SMs, and 2 GB GPU memory. The expected latency is 1252 ms. <TOOL_image_classification_small_2_4_20_2>"
+    
+    encoding = encoder.tokenizer(
+        test_prompt,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=512,
+    )
+    
+    print(f"Input text: {test_prompt[:100]}...")
+    print(f"Token IDs shape: {encoding['input_ids'].shape}")
+    print(f"First 10 token IDs: {encoding['input_ids'][0][:10].tolist()}")
+    print()
+    
+    # Test forward pass
+    print("=" * 80)
+    print("Test 2: Forward Pass")
+    print("=" * 80)
+    
+    input_ids = encoding["input_ids"]
+    attention_mask = encoding["attention_mask"]
+    labels = input_ids.clone()
+    
+    outputs = encoder(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        labels=labels,
+    )
+    
+    print(f"Loss: {outputs.loss.item():.4f}")
+    print(f"Logits shape: {outputs.logits.shape}")
+    print(f"Expected vocab size: {encoder.extended_vocab_size}")
+    print()
+    
+    # Test parameter saving and loading
+    print("=" * 80)
+    print("Test 3: Parameter Saving and Loading")
+    print("=" * 80)
+    
+    import os
+    import tempfile
+    
+    # Create temp file for testing
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pt') as f:
+        save_path = f.name
+    
+    try:
+        # Save
+        encoder.save_new_parameters(save_path)
+        print(f"Saved parameters to: {save_path}")
+        
+        # Modify parameters
+        original_embedding = encoder.llm_model.get_input_embeddings().weight.data[encoder.original_vocab_size].clone()
+        encoder.llm_model.get_input_embeddings().weight.data[encoder.original_vocab_size] *= 2.0
+        modified_embedding = encoder.llm_model.get_input_embeddings().weight.data[encoder.original_vocab_size].clone()
+        
+        print(f"Original embedding norm: {original_embedding.norm().item():.4f}")
+        print(f"Modified embedding norm: {modified_embedding.norm().item():.4f}")
+        
+        # Load
+        encoder.load_new_parameters(save_path)
+        restored_embedding = encoder.llm_model.get_input_embeddings().weight.data[encoder.original_vocab_size].clone()
+        
+        print(f"Restored embedding norm: {restored_embedding.norm().item():.4f}")
+        
+        # Verify restoration
+        if torch.allclose(original_embedding, restored_embedding, atol=1e-6):
+            print("✓ Parameter save/load test passed!")
+        else:
+            print("✗ Parameter restoration failed!")
+    finally:
+        # Clean up
+        if os.path.exists(save_path):
+            os.remove(save_path)
+    
+    print()
+    print("=" * 80)
+    print("All tests passed!")
+    print("=" * 80)
+
+
 def test_pretrain_encoder():
     """Test the pre-training encoder."""
     print("=== Testing ResourceEncoderForPretraining (Redesigned) ===\n")
@@ -647,4 +1135,11 @@ def test_pretrain_encoder():
 
 
 if __name__ == "__main__":
-    test_pretrain_encoder()
+    # Test both encoders
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "naive":
+        test_naive_pretrain_encoder()
+    else:
+        test_pretrain_encoder()
+
