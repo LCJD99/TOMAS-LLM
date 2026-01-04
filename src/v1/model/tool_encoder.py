@@ -690,7 +690,6 @@ class NaiveEncoderForPretraining(nn.Module):
         
         # Initialize new token embeddings
         new_embeddings_init = []
-        breakpoint()
         for combined_token in self.combined_tokens:
             # Tokenize the combined token using the original vocabulary
             token_ids = self.tokenizer.encode(
@@ -805,11 +804,9 @@ class NaiveEncoderForPretraining(nn.Module):
         new_embeds = self.new_token_embeddings(new_token_indices)
         
         # Combine embeddings based on mask
-        combined_embeds = torch.where(
-            new_token_mask.unsqueeze(-1),
-            new_embeds,
-            original_embeds
-        )
+        # Use weighted sum instead of torch.where to maintain gradient flow
+        mask_float = new_token_mask.unsqueeze(-1).float()
+        combined_embeds = mask_float * new_embeds + (1 - mask_float) * original_embeds
         
         # Pass through transformer (without lm_head)
         outputs = self.llm_model(
@@ -886,11 +883,9 @@ class NaiveEncoderForPretraining(nn.Module):
                 new_token_indices = torch.clamp(new_token_indices, min=0)
                 new_embeds = self.new_token_embeddings(new_token_indices)
                 
-                inputs_embeds = torch.where(
-                    new_token_mask.unsqueeze(-1),
-                    new_embeds,
-                    original_embeds
-                )
+                # Use weighted sum to maintain gradient flow
+                mask_float = new_token_mask.unsqueeze(-1).float()
+                inputs_embeds = mask_float * new_embeds + (1 - mask_float) * original_embeds
             
             # Forward through transformer
             outputs = original_forward(
