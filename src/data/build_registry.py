@@ -53,10 +53,10 @@ def load_profiling(profiling_path: str) -> pd.DataFrame:
 def generate_semantic_description(
     tool_name: str,
     input_size: str,
-    cpu_core_level: str,
-    cpu_mem_level: str,
-    gpu_sm_level: str,
-    gpu_mem_level: str
+    cpu_core: int,
+    cpu_mem_gb: float,
+    gpu_sm: int,
+    gpu_mem_gb: float
 ) -> str:
     """
     Generate human-readable semantic description for a token.
@@ -64,10 +64,10 @@ def generate_semantic_description(
     Args:
         tool_name: Tool name
         input_size: Input size (small/medium/large)
-        cpu_core_level: CPU core level (low/medium/high)
-        cpu_mem_level: CPU memory level (low/medium/high)
-        gpu_sm_level: GPU SM level (low/medium/high)
-        gpu_mem_level: GPU memory level (low/medium/high)
+        cpu_core: CPU core count
+        cpu_mem_gb: CPU memory in GB
+        gpu_sm: GPU SM count
+        gpu_mem_gb: GPU memory in GB
     
     Returns:
         Semantic description string
@@ -76,8 +76,8 @@ def generate_semantic_description(
     
     return (
         f"{tool_display} for {input_size} inputs with "
-        f"{cpu_core_level} CPU cores, {cpu_mem_level} CPU memory, "
-        f"{gpu_sm_level} GPU compute, and {gpu_mem_level} GPU memory"
+        f"{cpu_core} CPU cores, {int(cpu_mem_gb)}GB CPU memory, "
+        f"{gpu_sm}% GPU SM units, and {int(gpu_mem_gb)}GB GPU memory"
     )
 
 
@@ -135,10 +135,10 @@ def build_registry(
         semantic_desc = generate_semantic_description(
             tool_name,
             input_size,
-            cpu_core_level,
-            cpu_mem_level,
-            gpu_sm_level,
-            gpu_mem_level
+            int(row['cpu_core']),
+            float(row['cpu_mem_gb']),
+            int(row['gpu_sm']),
+            float(row['gpu_mem_gb'])
         )
         
         # Create token entry
