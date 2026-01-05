@@ -64,3 +64,6 @@ tmp/
 temp/
 
 hub/
+
+data/
+!/src/data/
