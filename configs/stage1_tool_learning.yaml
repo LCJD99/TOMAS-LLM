@@ -1,0 +1,54 @@
+# TOMAS-LLM Stage 1: Tool Token Learning Configuration
+
+# Model
+base_model: "Qwen2.5-7B"
+initialized_model: "checkpoints/model_initialized/"
+tokenizer: "checkpoints/tokenizer_expanded/"
+
+# Data
+train_data: "data/processed/train.jsonl"
+max_length: 512
+
+# Training
+task_type: "causal_lm"
+num_epochs: 3
+batch_size: 4
+gradient_accumulation_steps: 8
+learning_rate: 2e-5
+warmup_ratio: 0.03
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+# LoRA Configuration
+use_lora: true
+lora_r: 128
+lora_alpha: 32
+lora_dropout: 0.1
+lora_target_modules:
+  - q_proj
+  - v_proj
+  - k_proj
+  - o_proj
+train_embeddings: true  # 关键: 训练 Embedding 层
+
+# Mixed Precision Training
+fp16: false
+bf16: true  # 推荐用于支持 bf16 的硬件
+
+# Logging & Checkpointing
+logging_steps: 10
+save_steps: 500
+save_total_limit: 3
+output_dir: "checkpoints/stage1/"
+
+# Optimizer
+optim: "adamw_torch"
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_epsilon: 1e-8
+
+# Other
+seed: 42
+dataloader_num_workers: 4
+remove_unused_columns: false
+report_to: "wandb"  
