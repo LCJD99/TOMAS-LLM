@@ -118,38 +118,38 @@ def setup_training_args(config: Dict) -> TrainingArguments:
         output_dir=config['output_dir'],
         
         # Training hyperparameters
-        num_train_epochs=config.get('num_epochs', 3),
-        per_device_train_batch_size=config.get('batch_size', 4),
-        gradient_accumulation_steps=config.get('gradient_accumulation_steps', 8),
-        learning_rate=config.get('learning_rate', 2e-5),
-        weight_decay=config.get('weight_decay', 0.01),
-        warmup_ratio=config.get('warmup_ratio', 0.03),
-        max_grad_norm=config.get('max_grad_norm', 1.0),
+        num_train_epochs=int(config.get('num_epochs', 3)),
+        per_device_train_batch_size=int(config.get('batch_size', 4)),
+        gradient_accumulation_steps=int(config.get('gradient_accumulation_steps', 8)),
+        learning_rate=float(config.get('learning_rate', 2e-5)),
+        weight_decay=float(config.get('weight_decay', 0.01)),
+        warmup_ratio=float(config.get('warmup_ratio', 0.03)),
+        max_grad_norm=float(config.get('max_grad_norm', 1.0)),
         
         # Optimizer
         optim=config.get('optim', 'adamw_torch'),
-        adam_beta1=config.get('adam_beta1', 0.9),
-        adam_beta2=config.get('adam_beta2', 0.999),
-        adam_epsilon=config.get('adam_epsilon', 1e-8),
+        adam_beta1=float(config.get('adam_beta1', 0.9)),
+        adam_beta2=float(config.get('adam_beta2', 0.999)),
+        adam_epsilon=float(config.get('adam_epsilon', 1e-8)),
         
         # Mixed precision
         fp16=config.get('fp16', False),
         bf16=config.get('bf16', True),
         
         # Logging
-        logging_steps=config.get('logging_steps', 10),
+        logging_steps=int(config.get('logging_steps', 10)),
         logging_dir=os.path.join(config['output_dir'], 'logs'),
         report_to=report_to,
         
         # Checkpointing
-        save_steps=config.get('save_steps', 500),
-        save_total_limit=config.get('save_total_limit', 3),
+        save_steps=int(config.get('save_steps', 500)),
+        save_total_limit=int(config.get('save_total_limit', 3)),
         save_strategy='steps',
         
         # Other
-        dataloader_num_workers=config.get('dataloader_num_workers', 4),
-        remove_unused_columns=config.get('remove_unused_columns', False),
-        seed=config.get('seed', 42),
+        dataloader_num_workers=int(config.get('dataloader_num_workers', 4)),
+        remove_unused_columns=bool(config.get('remove_unused_columns', False)),
+        seed=int(config.get('seed', 42)),
         
         # Disable evaluation if no val data
         # evaluation_strategy='no',
