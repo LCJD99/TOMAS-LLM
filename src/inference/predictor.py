@@ -6,6 +6,7 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor, LogitsProcessorList
 from typing import List, Optional
+from src.data.token_schema import TOOL_ABBREV
 
 
 class VirtualTokenOnlyLogitsProcessor(LogitsProcessor):
@@ -59,7 +60,7 @@ def get_virtual_token_ids(tokenizer) -> List[int]:
         # 检查是否是虚拟token（以 < 开头，以 > 结尾，包含下划线）
         if token.startswith('<') and token.endswith('>') and '_' in token:
             # 进一步检查是否包含工具名称关键字
-            tool_keywords = ['IMG_CLS', 'OBJ_DET', 'SEG', 'NLP_CLS', 'NLP_NER', 'NLP_QA', 'SPEECH']
+            tool_keywords = TOOL_ABBREV.values()
             if any(keyword in token for keyword in tool_keywords):
                 virtual_token_ids.append(token_id)
     
