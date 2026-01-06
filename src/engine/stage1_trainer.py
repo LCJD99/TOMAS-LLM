@@ -152,14 +152,14 @@ def setup_training_args(config: Dict) -> TrainingArguments:
         seed=config.get('seed', 42),
         
         # Disable evaluation if no val data
-        evaluation_strategy='no',
-        load_best_model_at_end=False,
+        # evaluation_strategy='no',
+        # load_best_model_at_end=False,
     )
     
     return training_args
 
 
-def train(config_path: str):
+def train_stage1(config_path: str):
     """
     Main training function.
     
@@ -247,4 +247,4 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    train(args.config)
+    train_stage1(args.config)
