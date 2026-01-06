@@ -3,9 +3,13 @@
 限制只从扩充的虚拟token中采样
 """
 
+import json
 import torch
+from pathlib import Path
+from typing import List, Optional, Dict
+from collections import defaultdict
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor, LogitsProcessorList
-from typing import List, Optional
 from src.data.token_schema import TOOL_ABBREV
 
 
@@ -66,6 +70,24 @@ def get_virtual_token_ids(tokenizer) -> List[int]:
     
     print(f"找到 {len(virtual_token_ids)} 个虚拟token")
     return virtual_token_ids
+
+
+def load_jsonl(file_path: str) -> List[Dict]:
+    """
+    加载JSONL文件
+    
+    Args:
+        file_path: JSONL文件路径
+    
+    Returns:
+        数据列表
+    """
+    data = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                data.append(json.loads(line.strip()))
+    return data
 
 
 class ToolPredictor:
@@ -241,6 +263,144 @@ class ToolPredictor:
             results.append((token, prob.item()))
         
         return results
+    
+    def evaluate_on_data(
+        self,
+        data_path: str,
+        output_path: str,
+        num_samples: Optional[int] = None,
+        **predict_kwargs
+    ) -> Dict:
+        """
+        在训练数据上评估模型并输出结果
+        
+        Args:
+            data_path: 训练数据路径（JSONL格式）
+            output_path: 输出JSON文件路径
+            num_samples: 评估样本数量（None表示全部）
+            **predict_kwargs: predict方法的其他参数
+        
+        Returns:
+            评估结果字典
+        """
+        print(f"\n加载数据: {data_path}")
+        data = load_jsonl(data_path)
+        
+        if num_samples is not None:
+            import random
+            if num_samples < len(data):
+                data = random.sample(data, num_samples)
+        
+        print(f"评估样本数: {len(data)}")
+        
+        # 评估
+        results = []
+        correct = 0
+        total = len(data)
+        
+        # 统计指标
+        tool_stats = defaultdict(lambda: {'correct': 0, 'total': 0})
+        augmentation_stats = defaultdict(lambda: {'correct': 0, 'total': 0})
+        
+        print("\n开始预测...")
+        for item in tqdm(data, desc="评估进度"):
+            input_text = item['input']
+            ground_truth = item['output']
+            
+            # 预测
+            try:
+                prediction = self.predict(input_text, **predict_kwargs)
+            except Exception as e:
+                print(f"\n预测失败: {e}")
+                prediction = "[ERROR]"
+            
+            # 判断正确性
+            is_correct = (prediction == ground_truth)
+            if is_correct:
+                correct += 1
+            
+            # 提取工具名称和增强类型（如果存在）
+            tool_name = item.get('tool', 'unknown')
+            augmentation_type = item.get('augmentation_type', 'unknown')
+            
+            # 更新统计
+            tool_stats[tool_name]['total'] += 1
+            if is_correct:
+                tool_stats[tool_name]['correct'] += 1
+            
+            augmentation_stats[augmentation_type]['total'] += 1
+            if is_correct:
+                augmentation_stats[augmentation_type]['correct'] += 1
+            
+            # 记录结果
+            results.append({
+                'input': input_text,
+                'ground_truth': ground_truth,
+                'prediction': prediction,
+                'correct': is_correct,
+                'tool': tool_name,
+                'augmentation_type': augmentation_type
+            })
+        
+        # 计算准确率
+        overall_accuracy = correct / total if total > 0 else 0.0
+        
+        # 计算各工具准确率
+        tool_accuracy = {}
+        for tool, stats in tool_stats.items():
+            acc = stats['correct'] / stats['total'] if stats['total'] > 0 else 0.0
+            tool_accuracy[tool] = {
+                'accuracy': acc,
+                'correct': stats['correct'],
+                'total': stats['total']
+            }
+        
+        # 计算各增强类型准确率
+        augmentation_accuracy = {}
+        for aug_type, stats in augmentation_stats.items():
+            acc = stats['correct'] / stats['total'] if stats['total'] > 0 else 0.0
+            augmentation_accuracy[aug_type] = {
+                'accuracy': acc,
+                'correct': stats['correct'],
+                'total': stats['total']
+            }
+        
+        # 构造输出
+        output_data = {
+            'summary': {
+                'total_samples': total,
+                'correct_predictions': correct,
+                'overall_accuracy': overall_accuracy
+            },
+            'tool_accuracy': tool_accuracy,
+            'augmentation_accuracy': augmentation_accuracy,
+            'predictions': results
+        }
+        
+        # 保存到文件
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(output_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"\n评估完成！")
+        print(f"总样本数: {total}")
+        print(f"正确预测: {correct}")
+        print(f"总体准确率: {overall_accuracy:.2%}")
+        print(f"\n结果已保存到: {output_path}")
+        
+        # 显示错误案例（前5个）
+        error_cases = [r for r in results if not r['correct']]
+        if error_cases:
+            print(f"\n错误案例数: {len(error_cases)}")
+            print("\n前5个错误案例:")
+            for i, case in enumerate(error_cases[:5], 1):
+                print(f"\n{i}. 输入: {case['input'][:100]}...")
+                print(f"   Ground Truth: {case['ground_truth']}")
+                print(f"   Prediction: {case['prediction']}")
+        
+        return output_data
 
 
 def main():
@@ -251,33 +411,59 @@ def main():
     
     parser = argparse.ArgumentParser(description='工具预测推理')
     parser.add_argument('--model', type=str, required=True, help='模型路径')
-    parser.add_argument('--input', type=str, required=True, help='输入任务描述')
+    parser.add_argument('--mode', type=str, default='single', choices=['single', 'evaluate'], 
+                       help='运行模式: single=单条预测, evaluate=批量评估')
+    
+    # 单条预测模式参数
+    parser.add_argument('--input', type=str, help='输入任务描述（单条预测模式）')
     parser.add_argument('--top_k', type=int, default=5, help='显示top-k候选')
     parser.add_argument('--sample', action='store_true', help='使用采样而非贪婪解码')
     parser.add_argument('--temperature', type=float, default=1.0, help='采样温度')
+    
+    # 批量评估模式参数
+    parser.add_argument('--data', type=str, help='训练数据路径（评估模式）')
+    parser.add_argument('--output', type=str, help='输出JSON文件路径（评估模式）')
+    parser.add_argument('--num_samples', type=int, help='评估样本数（None=全部）')
     
     args = parser.parse_args()
     
     # 初始化预测器
     predictor = ToolPredictor(args.model)
     
-    # 预测
-    print(f"\n输入: {args.input}")
-    print("-" * 60)
+    if args.mode == 'single':
+        # 单条预测模式
+        if not args.input:
+            parser.error("单条预测模式需要 --input 参数")
+        
+        print(f"\n输入: {args.input}")
+        print("-" * 60)
+        
+        # 贪婪解码预测
+        prediction = predictor.predict(
+            args.input,
+            do_sample=args.sample,
+            temperature=args.temperature
+        )
+        print(f"预测结果: {prediction}")
+        
+        # 显示top-k候选
+        print(f"\nTop-{args.top_k} 候选:")
+        candidates = predictor.predict_with_scores(args.input, top_k=args.top_k)
+        for i, (token, score) in enumerate(candidates, 1):
+            print(f"{i}. {token:30s} (score: {score:.4f})")
     
-    # 贪婪解码预测
-    prediction = predictor.predict(
-        args.input,
-        do_sample=args.sample,
-        temperature=args.temperature
-    )
-    print(f"预测结果: {prediction}")
-    
-    # 显示top-k候选
-    print(f"\nTop-{args.top_k} 候选:")
-    candidates = predictor.predict_with_scores(args.input, top_k=args.top_k)
-    for i, (token, score) in enumerate(candidates, 1):
-        print(f"{i}. {token:30s} (score: {score:.4f})")
+    elif args.mode == 'evaluate':
+        # 批量评估模式
+        if not args.data or not args.output:
+            parser.error("评估模式需要 --data 和 --output 参数")
+        
+        predictor.evaluate_on_data(
+            data_path=args.data,
+            output_path=args.output,
+            num_samples=args.num_samples,
+            do_sample=args.sample,
+            temperature=args.temperature
+        )
 
 
 if __name__ == '__main__':
