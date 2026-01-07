@@ -99,7 +99,8 @@ class ToolPredictor:
         self,
         model_path: str,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-        torch_dtype=torch.bfloat16
+        torch_dtype=torch.bfloat16,
+        constrained: bool = True
     ):
         """
         初始化预测器
@@ -108,6 +109,7 @@ class ToolPredictor:
             model_path: 模型路径
             device: 计算设备
             torch_dtype: 数据类型
+            constrained: 是否使用约束生成（只从虚拟token采样）
         """
         print(f"加载模型: {model_path}")
         self.device = device
@@ -131,39 +133,48 @@ class ToolPredictor:
         
         self.model.eval()
         
+        # 保存约束配置
+        self.constrained = constrained
+        
         # 获取虚拟token ID列表
-        print("识别虚拟token...")
-        self.virtual_token_ids = get_virtual_token_ids(self.tokenizer)
-        
-        # 创建logits processor
-        self.logits_processor = LogitsProcessorList([
-            VirtualTokenOnlyLogitsProcessor(self.virtual_token_ids)
-        ])
-        
-        print(f"模型加载完成，使用设备: {device}")
+        if constrained:
+            print("识别虚拟token...")
+            self.virtual_token_ids = get_virtual_token_ids(self.tokenizer)
+            
+            # 创建logits processor
+            self.logits_processor = LogitsProcessorList([
+                VirtualTokenOnlyLogitsProcessor(self.virtual_token_ids)
+            ])
+            print(f"模型加载完成，使用设备: {device}（约束生成模式）")
+        else:
+            self.virtual_token_ids = []
+            self.logits_processor = None
+            print(f"模型加载完成，使用设备: {device}（无约束生成模式）")
     
     def predict(
         self,
         input_text: str,
-        max_new_tokens: int = 10,
+        max_new_tokens: int = 1,
         temperature: float = 1.0,
         do_sample: bool = False,
         top_p: float = 1.0,
-        top_k: int = 50
+        top_k: int = 50,
+        constrained: Optional[bool] = None
     ) -> str:
         """
-        预测工具token（仅从虚拟token中采样）
+        预测工具token
         
         Args:
             input_text: 输入文本（任务描述）
-            max_new_tokens: 最大生成token数
+            max_new_tokens: 最大生成token数（默认1）
             temperature: 采样温度
             do_sample: 是否使用采样（False为贪婪解码）
             top_p: Nucleus采样参数
             top_k: Top-K采样参数
+            constrained: 是否使用约束生成（None则使用初始化时的设置）
         
         Returns:
-            预测的虚拟token字符串
+            预测的token字符串
         """
         # 构造prompt
         prompt = f"Input: {input_text}\nOutput: "
@@ -171,19 +182,26 @@ class ToolPredictor:
         # Tokenize
         inputs = self.tokenizer(prompt, return_tensors='pt').to(self.device)
         
-        # Generate（限制只从虚拟token采样）
+        # 决定是否使用约束
+        use_constrained = constrained if constrained is not None else self.constrained
+        
+        # Generate
+        generate_kwargs = {
+            'max_new_tokens': max_new_tokens,
+            'do_sample': do_sample,
+            'temperature': temperature if do_sample else 1.0,
+            'top_p': top_p if do_sample else 1.0,
+            'top_k': top_k if do_sample else 50,
+            'pad_token_id': self.tokenizer.pad_token_id,
+            'eos_token_id': self.tokenizer.eos_token_id
+        }
+        
+        # 如果使用约束，添加logits_processor
+        if use_constrained and self.logits_processor is not None:
+            generate_kwargs['logits_processor'] = self.logits_processor
+        
         with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=do_sample,
-                temperature=temperature if do_sample else 1.0,
-                top_p=top_p if do_sample else 1.0,
-                top_k=top_k if do_sample else 50,
-                logits_processor=self.logits_processor,  # 限制采样范围
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id
-            )
+            outputs = self.model.generate(**inputs, **generate_kwargs)
         
         # Decode
         generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
@@ -224,7 +242,8 @@ class ToolPredictor:
     def predict_with_scores(
         self,
         input_text: str,
-        top_k: int = 5
+        top_k: int = 5,
+        constrained: Optional[bool] = None
     ) -> List[tuple]:
         """
         预测并返回top-k个候选token及其分数
@@ -232,6 +251,7 @@ class ToolPredictor:
         Args:
             input_text: 输入文本
             top_k: 返回前k个候选
+            constrained: 是否使用约束生成（None则使用初始化时的设置）
         
         Returns:
             [(token, score), ...] 列表
@@ -247,14 +267,22 @@ class ToolPredictor:
             outputs = self.model(**inputs)
             logits = outputs.logits[:, -1, :]  # 取最后一个位置的logits
         
-        # 应用logits processor（限制虚拟token）
-        processed_logits = self.logits_processor[0](inputs.input_ids, logits)
+        # 决定是否使用约束
+        use_constrained = constrained if constrained is not None else self.constrained
+        
+        # 应用logits processor（如果使用约束）
+        if use_constrained and self.logits_processor is not None:
+            processed_logits = self.logits_processor[0](inputs.input_ids, logits)
+            max_k = min(top_k, len(self.virtual_token_ids))
+        else:
+            processed_logits = logits
+            max_k = top_k
         
         # 计算概率
         probs = torch.softmax(processed_logits, dim=-1)
         
         # 获取top-k
-        top_probs, top_indices = torch.topk(probs[0], k=min(top_k, len(self.virtual_token_ids)))
+        top_probs, top_indices = torch.topk(probs[0], k=max_k)
         
         # 解码token
         results = []
@@ -413,12 +441,17 @@ def main():
     parser.add_argument('--model', type=str, required=True, help='模型路径')
     parser.add_argument('--mode', type=str, default='single', choices=['single', 'evaluate'], 
                        help='运行模式: single=单条预测, evaluate=批量评估')
+    parser.add_argument('--constrained', action='store_true', default=True, 
+                       help='使用约束生成（只从虚拟token采样）')
+    parser.add_argument('--no-constrained', dest='constrained', action='store_false',
+                       help='使用无约束生成')
     
     # 单条预测模式参数
     parser.add_argument('--input', type=str, help='输入任务描述（单条预测模式）')
     parser.add_argument('--top_k', type=int, default=5, help='显示top-k候选')
     parser.add_argument('--sample', action='store_true', help='使用采样而非贪婪解码')
     parser.add_argument('--temperature', type=float, default=1.0, help='采样温度')
+    parser.add_argument('--max_tokens', type=int, default=1, help='最大生成token数')
     
     # 批量评估模式参数
     parser.add_argument('--data', type=str, help='训练数据路径（评估模式）')
@@ -428,7 +461,7 @@ def main():
     args = parser.parse_args()
     
     # 初始化预测器
-    predictor = ToolPredictor(args.model)
+    predictor = ToolPredictor(args.model, constrained=args.constrained)
     
     if args.mode == 'single':
         # 单条预测模式
@@ -438,9 +471,10 @@ def main():
         print(f"\n输入: {args.input}")
         print("-" * 60)
         
-        # 贪婪解码预测
+        # 预测
         prediction = predictor.predict(
             args.input,
+            max_new_tokens=args.max_tokens,
             do_sample=args.sample,
             temperature=args.temperature
         )
@@ -461,6 +495,7 @@ def main():
             data_path=args.data,
             output_path=args.output,
             num_samples=args.num_samples,
+            max_new_tokens=args.max_tokens,
             do_sample=args.sample,
             temperature=args.temperature
         )
