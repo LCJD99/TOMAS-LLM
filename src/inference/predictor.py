@@ -429,6 +429,210 @@ class ToolPredictor:
                 print(f"   Prediction: {case['prediction']}")
         
         return output_data
+    
+    def compare_tokenization(
+        self,
+        data_path: str,
+        dataset_tokenizer_path: Optional[str] = None,
+        num_samples: int = 10,
+        output_path: Optional[str] = None
+    ) -> Dict:
+        """
+        比较predictor的tokenizer和dataset使用的tokenizer的token ID差异
+        
+        Args:
+            data_path: 训练数据路径（JSONL格式）
+            dataset_tokenizer_path: dataset使用的tokenizer路径（None则使用相同的）
+            num_samples: 比较的样本数量
+            output_path: 输出结果的JSON文件路径（可选）
+        
+        Returns:
+            比较结果字典
+        """
+        print(f"\n=== Tokenizer比较分析 ===")
+        print(f"Predictor tokenizer: {self.tokenizer.name_or_path}")
+        
+        # 加载dataset tokenizer（如果指定了不同的路径）
+        if dataset_tokenizer_path and dataset_tokenizer_path != self.tokenizer.name_or_path:
+            print(f"Dataset tokenizer: {dataset_tokenizer_path}")
+            from transformers import AutoTokenizer
+            dataset_tokenizer = AutoTokenizer.from_pretrained(
+                dataset_tokenizer_path,
+                trust_remote_code=True
+            )
+        else:
+            print("Dataset tokenizer: 使用相同的tokenizer")
+            dataset_tokenizer = self.tokenizer
+        
+        # 加载数据
+        print(f"\n加载数据: {data_path}")
+        data = load_jsonl(data_path)
+        
+        # 随机采样
+        import random
+        if num_samples < len(data):
+            samples = random.sample(data, num_samples)
+        else:
+            samples = data[:num_samples]
+        
+        print(f"分析样本数: {len(samples)}\n")
+        
+        # 比较结果
+        comparison_results = []
+        total_differences = 0
+        
+        for idx, item in enumerate(samples, 1):
+            input_text = item['input']
+            output_text = item['output']
+            
+            # 构造完整文本（按照dataset的格式）
+            input_part = f"Input: {input_text}\nOutput: "
+            full_text = input_part + output_text
+            
+            # Predictor tokenizer编码
+            predictor_input_encoding = self.tokenizer(
+                input_part,
+                add_special_tokens=True,
+                return_tensors='pt'
+            )
+            predictor_full_encoding = self.tokenizer(
+                full_text,
+                add_special_tokens=True,
+                return_tensors='pt'
+            )
+            
+            # Dataset tokenizer编码
+            dataset_input_encoding = dataset_tokenizer(
+                input_part,
+                add_special_tokens=True,
+                return_tensors='pt'
+            )
+            dataset_full_encoding = dataset_tokenizer(
+                full_text,
+                add_special_tokens=True,
+                return_tensors='pt'
+            )
+            
+            # 提取token IDs
+            predictor_input_ids = predictor_input_encoding['input_ids'][0].tolist()
+            predictor_full_ids = predictor_full_encoding['input_ids'][0].tolist()
+            dataset_input_ids = dataset_input_encoding['input_ids'][0].tolist()
+            dataset_full_ids = dataset_full_encoding['input_ids'][0].tolist()
+            
+            # 解码查看差异
+            predictor_input_tokens = [self.tokenizer.decode([tid]) for tid in predictor_input_ids]
+            predictor_full_tokens = [self.tokenizer.decode([tid]) for tid in predictor_full_ids]
+            dataset_input_tokens = [dataset_tokenizer.decode([tid]) for tid in dataset_input_ids]
+            dataset_full_tokens = [dataset_tokenizer.decode([tid]) for tid in dataset_full_ids]
+            
+            # 检查差异
+            input_ids_match = (predictor_input_ids == dataset_input_ids)
+            full_ids_match = (predictor_full_ids == dataset_full_ids)
+            
+            if not input_ids_match or not full_ids_match:
+                total_differences += 1
+            
+            # 详细比较
+            input_length_predictor = len(predictor_input_ids)
+            input_length_dataset = len(dataset_input_ids)
+            full_length_predictor = len(predictor_full_ids)
+            full_length_dataset = len(dataset_full_ids)
+            
+            # 找出output部分的token IDs
+            predictor_output_ids = predictor_full_ids[input_length_predictor:]
+            dataset_output_ids = dataset_full_ids[input_length_dataset:]
+            
+            predictor_output_tokens = [self.tokenizer.decode([tid]) for tid in predictor_output_ids]
+            dataset_output_tokens = [dataset_tokenizer.decode([tid]) for tid in dataset_output_ids]
+            
+            output_ids_match = (predictor_output_ids == dataset_output_ids)
+            
+            result = {
+                'sample_index': idx,
+                'input_text_preview': input_text[:100] + '...' if len(input_text) > 100 else input_text,
+                'output_text': output_text,
+                'predictor': {
+                    'input_length': input_length_predictor,
+                    'full_length': full_length_predictor,
+                    'output_length': len(predictor_output_ids),
+                    'input_ids': predictor_input_ids,
+                    'output_ids': predictor_output_ids,
+                    'input_tokens': predictor_input_tokens,
+                    'output_tokens': predictor_output_tokens
+                },
+                'dataset': {
+                    'input_length': input_length_dataset,
+                    'full_length': full_length_dataset,
+                    'output_length': len(dataset_output_ids),
+                    'input_ids': dataset_input_ids,
+                    'output_ids': dataset_output_ids,
+                    'input_tokens': dataset_input_tokens,
+                    'output_tokens': dataset_output_tokens
+                },
+                'match': {
+                    'input_ids_match': input_ids_match,
+                    'output_ids_match': output_ids_match,
+                    'full_ids_match': full_ids_match
+                }
+            }
+            
+            comparison_results.append(result)
+            
+            # 打印差异（如果存在）
+            if not full_ids_match:
+                print(f"\n样本 {idx} - 发现差异:")
+                print(f"  输入: {input_text[:80]}...")
+                print(f"  输出: {output_text}")
+                
+                if not input_ids_match:
+                    print(f"  ❌ Input部分Token IDs不匹配")
+                    print(f"     Predictor长度: {input_length_predictor}")
+                    print(f"     Dataset长度: {input_length_dataset}")
+                else:
+                    print(f"  ✓ Input部分Token IDs匹配")
+                
+                if not output_ids_match:
+                    print(f"  ❌ Output部分Token IDs不匹配")
+                    print(f"     Predictor: {predictor_output_ids} -> {predictor_output_tokens}")
+                    print(f"     Dataset:   {dataset_output_ids} -> {dataset_output_tokens}")
+                else:
+                    print(f"  ✓ Output部分Token IDs匹配")
+        
+        # 生成摘要
+        summary = {
+            'total_samples': len(samples),
+            'samples_with_differences': total_differences,
+            'match_rate': (len(samples) - total_differences) / len(samples) if samples else 0,
+            'predictor_vocab_size': len(self.tokenizer),
+            'dataset_vocab_size': len(dataset_tokenizer),
+            'vocab_size_match': (len(self.tokenizer) == len(dataset_tokenizer))
+        }
+        
+        print(f"\n=== 比较摘要 ===")
+        print(f"总样本数: {summary['total_samples']}")
+        print(f"存在差异的样本数: {summary['samples_with_differences']}")
+        print(f"匹配率: {summary['match_rate']:.2%}")
+        print(f"Predictor词汇表大小: {summary['predictor_vocab_size']}")
+        print(f"Dataset词汇表大小: {summary['dataset_vocab_size']}")
+        print(f"词汇表大小匹配: {'✓' if summary['vocab_size_match'] else '❌'}")
+        
+        # 构造输出
+        output_data = {
+            'summary': summary,
+            'comparisons': comparison_results
+        }
+        
+        # 保存到文件（如果指定）
+        if output_path:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(output_data, f, indent=2, ensure_ascii=False)
+            
+            print(f"\n详细比较结果已保存到: {output_path}")
+        
+        return output_data
 
 
 def main():
@@ -439,8 +643,8 @@ def main():
     
     parser = argparse.ArgumentParser(description='工具预测推理')
     parser.add_argument('--model', type=str, required=True, help='模型路径')
-    parser.add_argument('--mode', type=str, default='single', choices=['single', 'evaluate'], 
-                       help='运行模式: single=单条预测, evaluate=批量评估')
+    parser.add_argument('--mode', type=str, default='single', choices=['single', 'evaluate', 'compare'], 
+                       help='运行模式: single=单条预测, evaluate=批量评估, compare=比较tokenization')
     parser.add_argument('--constrained', action='store_true', default=True, 
                        help='使用约束生成（只从虚拟token采样）')
     parser.add_argument('--no-constrained', dest='constrained', action='store_false',
@@ -457,6 +661,10 @@ def main():
     parser.add_argument('--data', type=str, help='训练数据路径（评估模式）')
     parser.add_argument('--output', type=str, help='输出JSON文件路径（评估模式）')
     parser.add_argument('--num_samples', type=int, help='评估样本数（None=全部）')
+    
+    # 比较tokenization模式参数
+    parser.add_argument('--dataset_tokenizer', type=str, help='Dataset使用的tokenizer路径（比较模式，可选）')
+    parser.add_argument('--compare_samples', type=int, default=10, help='比较的样本数量（比较模式）')
     
     args = parser.parse_args()
     
@@ -498,6 +706,18 @@ def main():
             max_new_tokens=args.max_tokens,
             do_sample=args.sample,
             temperature=args.temperature
+        )
+    
+    elif args.mode == 'compare':
+        # 比较tokenization模式
+        if not args.data:
+            parser.error("比较模式需要 --data 参数")
+        
+        predictor.compare_tokenization(
+            data_path=args.data,
+            dataset_tokenizer_path=args.dataset_tokenizer,
+            num_samples=args.compare_samples,
+            output_path=args.output
         )
 
 
