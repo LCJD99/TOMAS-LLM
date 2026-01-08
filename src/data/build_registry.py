@@ -60,6 +60,7 @@ def generate_semantic_description(
 ) -> str:
     """
     Generate human-readable semantic description for a token.
+    Uses RESOURCE_BINS to add semantic level descriptions (low/medium/high).
     
     Args:
         tool_name: Tool name
@@ -70,14 +71,24 @@ def generate_semantic_description(
         gpu_mem_gb: GPU memory in GB
     
     Returns:
-        Semantic description string
+        Semantic description string with both numeric values and level descriptions
     """
+    from .resource_binning import value_to_level
+    
     tool_display = tool_name.replace('_', ' ').title()
+    
+    # Determine semantic levels for each resource
+    cpu_core_level = value_to_level('cpu_core', cpu_core)
+    cpu_mem_level = value_to_level('cpu_mem_gb', cpu_mem_gb)
+    gpu_sm_level = value_to_level('gpu_sm', gpu_sm)
+    gpu_mem_level = value_to_level('gpu_mem_gb', gpu_mem_gb)
     
     return (
         f"{tool_display} for {input_size} inputs with "
-        f"{cpu_core} CPU cores, {int(cpu_mem_gb)}GB CPU memory, "
-        f"{gpu_sm}% GPU SM units, and {int(gpu_mem_gb)}GB GPU memory"
+        f"{cpu_core} CPU cores ({cpu_core_level} level), "
+        f"{int(cpu_mem_gb)}GB CPU memory ({cpu_mem_level} capacity), "
+        f"{gpu_sm} GPU SM units ({gpu_sm_level} compute), "
+        f"and {int(gpu_mem_gb)}GB GPU memory ({gpu_mem_level} allocation)"
     )
 
 
