@@ -24,9 +24,18 @@ def initialize_embeddings(
     expanded_tokenizer_path: str,
     registry: dict,
     output_dir: str,
-    device: str = 'cuda'
+    device: str = 'cuda',
+    semantic_ratio: int = 1
 ):
-    """初始化虚拟 Token 的 Embedding"""
+    """
+    初始化虚拟 Token 的 Embedding
+    
+    Args:
+        semantic_ratio: 语义部分占比，比例为 semantic_ratio / (semantic_ratio + 1)
+                       例如 semantic_ratio=1 表示 1/2 语义 + 1/2 差异
+                            semantic_ratio=2 表示 2/3 语义 + 1/3 差异
+                            semantic_ratio=3 表示 3/4 语义 + 1/4 差异
+    """
     
     print(f"加载基础模型: {base_model_name}")
     base_tokenizer = AutoTokenizer.from_pretrained(
@@ -64,11 +73,15 @@ def initialize_embeddings(
     
     print(f"初始化虚拟 Token Embeddings (共 {len(registry['tokens'])} 个)...")
     
-    # 获取 hidden size
+    # 获取 hidden size 并根据比例分配
     hidden_size = input_embeddings.weight.shape[1]
-    half_size = hidden_size // 2
+    total_ratio = semantic_ratio + 1
+    semantic_size = (hidden_size * semantic_ratio) // total_ratio
+    difference_size = hidden_size - semantic_size
     
-    print(f"Hidden size: {hidden_size}, 语义部分: {half_size}, 差异部分: {half_size}")
+    print(f"Hidden size: {hidden_size}")
+    print(f"语义部分: {semantic_size} ({semantic_ratio}/{total_ratio} = {semantic_size/hidden_size:.1%})")
+    print(f"差异部分: {difference_size} (1/{total_ratio} = {difference_size/hidden_size:.1%})")
     
     # 为每个虚拟 Token 初始化 Embedding
     with torch.no_grad():
@@ -88,15 +101,15 @@ def initialize_embeddings(
             desc_embeddings = input_embeddings(desc_input_ids)
             desc_mean = desc_embeddings.mean(dim=1).squeeze(0)  # [hidden_size]
             
-            # 取前 h/2 维度作为语义部分
-            semantic_part = desc_mean[:half_size]  # [half_size]
+            # 取前 semantic_size 维度作为语义部分
+            semantic_part = desc_mean[:semantic_size]  # [semantic_size]
             
-            # 2. 构造差异部分（后半截）：使用随机正交向量
+            # 2. 构造差异部分（后面部分）：使用随机正交向量
             # 创建一个临时矩阵用于正交初始化（使用 float32 避免 Half 精度问题）
-            orthogonal_matrix = torch.empty(half_size, half_size, device=device, dtype=torch.float32)
+            orthogonal_matrix = torch.empty(difference_size, difference_size, device=device, dtype=torch.float32)
             torch.nn.init.orthogonal_(orthogonal_matrix)
             # 取第一行作为差异向量，并转换回原始 dtype
-            difference_part = orthogonal_matrix[0].to(desc_mean.dtype)  # [half_size]
+            difference_part = orthogonal_matrix[0].to(desc_mean.dtype)  # [difference_size]
             
             # 3. 拼接：语义部分 + 差异部分
             final_embedding = torch.cat([semantic_part, difference_part], dim=0)  # [hidden_size]
@@ -204,6 +217,13 @@ def main():
         help='设备 (cuda/cpu)'
     )
     parser.add_argument(
+        '--semantic_ratio',
+        type=int,
+        default=1,
+        help='语义部分占比分子，比例为 semantic_ratio/(semantic_ratio+1)。'
+             '例如：1表示1/2语义+1/2差异，2表示2/3语义+1/3差异，3表示3/4语义+1/4差异'
+    )
+    parser.add_argument(
         '--verify',
         action='store_true',
         help='验证 Embedding 初始化'
@@ -225,7 +245,8 @@ def main():
         args.tokenizer,
         registry,
         args.output,
-        args.device
+        args.device,
+        args.semantic_ratio
     )
     
     # 验证
