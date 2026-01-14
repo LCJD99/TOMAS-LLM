@@ -13,6 +13,92 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor, L
 from src.data.token_schema import TOOL_ABBREV
 
 
+def parse_virtual_token(token: str) -> Dict[str, str]:
+    """
+    解析虚拟token的各个字段
+    格式: <TOOL_SIZE_CPU_CPUMEM_GPU_GPUMEM>
+    例如: <IMG_CLS_SMALL_LOW_MED_HIGH_LOW>
+    
+    Args:
+        token: 虚拟token字符串
+    
+    Returns:
+        字段字典，包含 tool, size, cpu_core, cpu_mem, gpu_sm, gpu_mem
+        如果解析失败，返回空字典
+    """
+    if not token.startswith('<') or not token.endswith('>'):
+        return {}
+    
+    # 去掉尖括号
+    token_content = token[1:-1]
+    
+    # 按下划线分割
+    parts = token_content.split('_')
+    
+    # 虚拟token应该有6个部分：TOOL, SIZE, CPU, CPUMEM, GPU, GPUMEM
+    if len(parts) != 6:
+        return {}
+    
+    return {
+        'tool': parts[0],
+        'size': parts[1],
+        'cpu_core': parts[2],
+        'cpu_mem': parts[3],
+        'gpu_sm': parts[4],
+        'gpu_mem': parts[5]
+    }
+
+
+def compare_token_fields(predicted: str, ground_truth: str) -> Dict[str, any]:
+    """
+    比较预测token和ground truth token的各个字段
+    
+    Args:
+        predicted: 预测的token
+        ground_truth: ground truth token
+    
+    Returns:
+        比较结果字典，包含各字段的匹配情况和总体匹配率
+    """
+    pred_fields = parse_virtual_token(predicted)
+    gt_fields = parse_virtual_token(ground_truth)
+    
+    # 如果任一解析失败，返回错误信息
+    if not pred_fields or not gt_fields:
+        return {
+            'exact_match': predicted == ground_truth,
+            'field_matches': {},
+            'match_rate': 1.0 if predicted == ground_truth else 0.0,
+            'matched_fields': 0,
+            'total_fields': 0,
+            'parse_error': True
+        }
+    
+    # 比较各个字段
+    field_matches = {}
+    matched_count = 0
+    
+    for field_name in ['tool', 'size', 'cpu_core', 'cpu_mem', 'gpu_sm', 'gpu_mem']:
+        is_match = pred_fields[field_name] == gt_fields[field_name]
+        field_matches[field_name] = is_match
+        if is_match:
+            matched_count += 1
+    
+    total_fields = len(field_matches)
+    match_rate = matched_count / total_fields if total_fields > 0 else 0.0
+    
+    return {
+        'exact_match': predicted == ground_truth,
+        'field_matches': field_matches,
+        'match_rate': match_rate,
+        'matched_fields': matched_count,
+        'total_fields': total_fields,
+        'parse_error': False,
+        'predicted_fields': pred_fields,
+        'ground_truth_fields': gt_fields
+    }
+
+
 class VirtualTokenOnlyLogitsProcessor(LogitsProcessor):
     """
     限制模型只能从虚拟token中采样的Logits处理器
@@ -323,12 +409,17 @@ class ToolPredictor:
         
         # 评估
         results = []
-        correct = 0
+        exact_match_count = 0
         total = len(data)
         
+        # 字段匹配统计
+        field_names = ['tool', 'size', 'cpu_core', 'cpu_mem', 'gpu_sm', 'gpu_mem']
+        overall_field_matches = {field: 0 for field in field_names}
+        overall_match_rate_sum = 0.0
+        
         # 统计指标
-        tool_stats = defaultdict(lambda: {'correct': 0, 'total': 0})
-        augmentation_stats = defaultdict(lambda: {'correct': 0, 'total': 0})
+        tool_stats = defaultdict(lambda: {'exact_match': 0, 'total': 0, 'match_rate_sum': 0.0})
+        augmentation_stats = defaultdict(lambda: {'exact_match': 0, 'total': 0, 'match_rate_sum': 0.0})
         
         print("\n开始预测...")
         for item in tqdm(data, desc="评估进度"):
@@ -342,10 +433,19 @@ class ToolPredictor:
                 print(f"\n预测失败: {e}")
                 prediction = "[ERROR]"
             
-            # 判断正确性
-            is_correct = (prediction == ground_truth)
-            if is_correct:
-                correct += 1
+            # 比较字段匹配情况
+            comparison = compare_token_fields(prediction, ground_truth)
+            
+            # 统计exact match
+            if comparison['exact_match']:
+                exact_match_count += 1
+            
+            # 累计字段匹配数
+            if not comparison['parse_error']:
+                for field in field_names:
+                    if comparison['field_matches'].get(field, False):
+                        overall_field_matches[field] += 1
+                overall_match_rate_sum += comparison['match_rate']
             
             # 提取工具名称和增强类型（如果存在）
             tool_name = item.get('tool', 'unknown')
@@ -353,43 +453,61 @@ class ToolPredictor:
             
             # 更新统计
             tool_stats[tool_name]['total'] += 1
-            if is_correct:
-                tool_stats[tool_name]['correct'] += 1
+            if comparison['exact_match']:
+                tool_stats[tool_name]['exact_match'] += 1
+            if not comparison['parse_error']:
+                tool_stats[tool_name]['match_rate_sum'] += comparison['match_rate']
             
             augmentation_stats[augmentation_type]['total'] += 1
-            if is_correct:
-                augmentation_stats[augmentation_type]['correct'] += 1
+            if comparison['exact_match']:
+                augmentation_stats[augmentation_type]['exact_match'] += 1
+            if not comparison['parse_error']:
+                augmentation_stats[augmentation_type]['match_rate_sum'] += comparison['match_rate']
             
             # 记录结果
             results.append({
                 'input': input_text,
                 'ground_truth': ground_truth,
                 'prediction': prediction,
-                'correct': is_correct,
+                'exact_match': comparison['exact_match'],
+                'match_rate': comparison['match_rate'],
+                'matched_fields': comparison['matched_fields'],
+                'total_fields': comparison['total_fields'],
+                'field_matches': comparison['field_matches'],
                 'tool': tool_name,
                 'augmentation_type': augmentation_type
             })
         
-        # 计算准确率
-        overall_accuracy = correct / total if total > 0 else 0.0
+        # 计算总体指标
+        exact_match_rate = exact_match_count / total if total > 0 else 0.0
+        overall_avg_match_rate = overall_match_rate_sum / total if total > 0 else 0.0
+        
+        # 计算各字段匹配率
+        field_match_rates = {}
+        for field in field_names:
+            field_match_rates[field] = overall_field_matches[field] / total if total > 0 else 0.0
         
         # 计算各工具准确率
         tool_accuracy = {}
         for tool, stats in tool_stats.items():
-            acc = stats['correct'] / stats['total'] if stats['total'] > 0 else 0.0
+            exact_match_acc = stats['exact_match'] / stats['total'] if stats['total'] > 0 else 0.0
+            avg_match_rate = stats['match_rate_sum'] / stats['total'] if stats['total'] > 0 else 0.0
             tool_accuracy[tool] = {
-                'accuracy': acc,
-                'correct': stats['correct'],
+                'exact_match_rate': exact_match_acc,
+                'avg_match_rate': avg_match_rate,
+                'exact_matches': stats['exact_match'],
                 'total': stats['total']
             }
         
         # 计算各增强类型准确率
         augmentation_accuracy = {}
         for aug_type, stats in augmentation_stats.items():
-            acc = stats['correct'] / stats['total'] if stats['total'] > 0 else 0.0
+            exact_match_acc = stats['exact_match'] / stats['total'] if stats['total'] > 0 else 0.0
+            avg_match_rate = stats['match_rate_sum'] / stats['total'] if stats['total'] > 0 else 0.0
             augmentation_accuracy[aug_type] = {
-                'accuracy': acc,
-                'correct': stats['correct'],
+                'exact_match_rate': exact_match_acc,
+                'avg_match_rate': avg_match_rate,
+                'exact_matches': stats['exact_match'],
                 'total': stats['total']
             }
         
@@ -397,8 +515,10 @@ class ToolPredictor:
         output_data = {
             'summary': {
                 'total_samples': total,
-                'correct_predictions': correct,
-                'overall_accuracy': overall_accuracy
+                'exact_matches': exact_match_count,
+                'exact_match_rate': exact_match_rate,
+                'overall_avg_match_rate': overall_avg_match_rate,
+                'field_match_rates': field_match_rates
             },
             'tool_accuracy': tool_accuracy,
             'augmentation_accuracy': augmentation_accuracy,
@@ -414,19 +534,28 @@ class ToolPredictor:
         
         print(f"\n评估完成！")
         print(f"总样本数: {total}")
-        print(f"正确预测: {correct}")
-        print(f"总体准确率: {overall_accuracy:.2%}")
+        print(f"完全匹配数: {exact_match_count}")
+        print(f"完全匹配率: {exact_match_rate:.2%}")
+        print(f"平均字段匹配率: {overall_avg_match_rate:.2%}")
+        print(f"\n各字段匹配率:")
+        for field, rate in field_match_rates.items():
+            print(f"  {field:12s}: {rate:.2%}")
         print(f"\n结果已保存到: {output_path}")
         
         # 显示错误案例（前5个）
-        error_cases = [r for r in results if not r['correct']]
+        error_cases = [r for r in results if not r['exact_match']]
         if error_cases:
-            print(f"\n错误案例数: {len(error_cases)}")
-            print("\n前5个错误案例:")
+            print(f"\n非完全匹配案例数: {len(error_cases)}")
+            print("\n前5个非完全匹配案例:")
             for i, case in enumerate(error_cases[:5], 1):
                 print(f"\n{i}. 输入: {case['input'][:100]}...")
                 print(f"   Ground Truth: {case['ground_truth']}")
-                print(f"   Prediction: {case['prediction']}")
+                print(f"   Prediction:   {case['prediction']}")
+                print(f"   字段匹配率: {case['match_rate']:.1%} ({case['matched_fields']}/{case['total_fields']})")
+                if case.get('field_matches'):
+                    mismatched = [f for f, matched in case['field_matches'].items() if not matched]
+                    if mismatched:
+                        print(f"   不匹配字段: {', '.join(mismatched)}")
         
         return output_data
     

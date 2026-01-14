@@ -30,8 +30,7 @@ def load_registry(registry_path: str) -> Dict:
 def generate_instruction_sample(
     token_name: str,
     token_info: Dict,
-    template: str,
-    template_type: str
+    augmentation_type: str
 ) -> Dict:
     """
     生成单个训练样本
@@ -39,21 +38,16 @@ def generate_instruction_sample(
     Args:
         token_name: token 名称 (如 IMG_CLS_SMALL_LOW_MED_HIGH_LOW)
         token_info: token 的详细信息
-        template: 模板字符串
-        template_type: 模板类型 (full_description/resource_focused/performance_focused)
+        augmentation_type: 数据增强类型
     
     Returns:
         训练样本字典
     """
-    try:
-        from .templates import format_template
-    except ImportError:
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent))
-        from templates import format_template
+    # 获取对应的生成器
+    generator = AUGMENTATION_GENERATORS[augmentation_type]
     
     # 生成输入文本
-    input_text = format_template(template, token_info, vary=True)
+    input_text = generator(token_info)
     
     # 输出是格式化的 token (带尖括号)
     output_token = format_token_for_model(token_name)
@@ -63,7 +57,7 @@ def generate_instruction_sample(
         "input": input_text,
         "output": output_token,
         "metadata": {
-            "template_type": template_type,
+            "augmentation_type": augmentation_type,
             "expected_latency_ms": token_info['latency_ms'],
             "tool": token_info['tool_name'],
             "token_name": token_name,
@@ -92,20 +86,11 @@ def generate_all_samples(
     Returns:
         所有样本列表
     """
-    try:
-        from .templates import (
-            FULL_DESCRIPTION_TEMPLATES,
-            RESOURCE_FOCUSED_TEMPLATES,
-            PERFORMANCE_FOCUSED_TEMPLATES
-        )
-    except ImportError:
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent))
-        from templates import (
-            FULL_DESCRIPTION_TEMPLATES,
-            RESOURCE_FOCUSED_TEMPLATES,
-            PERFORMANCE_FOCUSED_TEMPLATES
-        )
+    from .templates import (
+        FULL_DESCRIPTION_TEMPLATES,
+        RESOURCE_FOCUSED_TEMPLATES,
+        PERFORMANCE_FOCUSED_TEMPLATES
+    )
     
     # 收集所有模板
     all_templates = []

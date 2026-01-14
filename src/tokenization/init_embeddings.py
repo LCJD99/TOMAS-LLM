@@ -64,25 +64,42 @@ def initialize_embeddings(
     
     print(f"初始化虚拟 Token Embeddings (共 {len(registry['tokens'])} 个)...")
     
+    # 获取 hidden size
+    hidden_size = input_embeddings.weight.shape[1]
+    half_size = hidden_size // 2
+    
+    print(f"Hidden size: {hidden_size}, 语义部分: {half_size}, 差异部分: {half_size}")
+    
     # 为每个虚拟 Token 初始化 Embedding
     with torch.no_grad():
         for token_name, token_info in tqdm(registry['tokens'].items(), desc="初始化 Embeddings"):
-            # 构造语义描述文本
-            semantic_text = f"{token_info['description']} with {token_info['semantic_description']}"
+            # 1. 获取语义部分（前半截）：使用 description 的 Embedding
+            description_text = token_info['description']
             
-            # Tokenize 并获取原始 Embedding
-            input_ids = base_tokenizer(
-                semantic_text,
+            # Tokenize description 并获取 Embedding
+            desc_input_ids = base_tokenizer(
+                description_text,
                 return_tensors='pt',
                 truncation=True,
                 max_length=512
             )['input_ids'].to(device)
             
-            # 获取文本的 embeddings
-            text_embeddings = input_embeddings(input_ids)
+            # 获取 description 的 embeddings 并计算均值
+            desc_embeddings = input_embeddings(desc_input_ids)
+            desc_mean = desc_embeddings.mean(dim=1).squeeze(0)  # [hidden_size]
             
-            # 计算均值作为新 Token 的初始 Embedding
-            mean_embedding = text_embeddings.mean(dim=1).squeeze(0)  # [hidden_size]
+            # 取前 h/2 维度作为语义部分
+            semantic_part = desc_mean[:half_size]  # [half_size]
+            
+            # 2. 构造差异部分（后半截）：使用随机正交向量
+            # 创建一个临时矩阵用于正交初始化（使用 float32 避免 Half 精度问题）
+            orthogonal_matrix = torch.empty(half_size, half_size, device=device, dtype=torch.float32)
+            torch.nn.init.orthogonal_(orthogonal_matrix)
+            # 取第一行作为差异向量，并转换回原始 dtype
+            difference_part = orthogonal_matrix[0].to(desc_mean.dtype)  # [half_size]
+            
+            # 3. 拼接：语义部分 + 差异部分
+            final_embedding = torch.cat([semantic_part, difference_part], dim=0)  # [hidden_size]
             
             # 获取新 Token 的 ID
             virtual_token = f"<{token_name}>"
@@ -93,9 +110,9 @@ def initialize_embeddings(
                 continue
             
             # 赋值给新 Token 的 Embedding
-            input_embeddings.weight.data[new_token_id] = mean_embedding
+            input_embeddings.weight.data[new_token_id] = final_embedding
             if output_embeddings is not None:
-                output_embeddings.weight.data[new_token_id] = mean_embedding
+                output_embeddings.weight.data[new_token_id] = final_embedding
     
     # 保存初始化后的模型
     output_path = Path(output_dir)
