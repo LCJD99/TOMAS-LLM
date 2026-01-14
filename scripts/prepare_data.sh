@@ -58,7 +58,7 @@ echo -e "${BLUE}================================================${NC}"
 echo ""
 
 echo -e "${YELLOW}[执行] 运行 build_registry.py...${NC}"
-$PYTHON_ENV src/data/build_registry.py \
+$PYTHON_ENV -m src.data.build_registry \
     --tools data/raw/tools.json \
     --profiling data/raw/profiling.csv \
     --output data/registry/tool_registry.json
