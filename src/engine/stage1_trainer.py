@@ -31,13 +31,13 @@ def load_config(config_path: str) -> Dict:
     return config
 
 
-def setup_model_and_tokenizer(config: Dict, resume_from: Optional[str] = None):
+def setup_model_and_tokenizer(config: Dict, load_lora_from: Optional[str] = None):
     """
     Load and configure model with LoRA and trainable embeddings.
     
     Args:
         config: Configuration dictionary
-        resume_from: Path to LoRA checkpoint directory to resume from (optional)
+        load_lora_from: Path to existing LoRA checkpoint to load for stage-2 training (optional)
     
     Returns:
         Tuple of (model, tokenizer)
@@ -58,15 +58,15 @@ def setup_model_and_tokenizer(config: Dict, resume_from: Optional[str] = None):
     
     # Configure LoRA
     if config.get('use_lora', True):
-        if resume_from:
-            # Load existing LoRA checkpoint
-            print(f"Loading LoRA checkpoint from {resume_from}...")
+        if load_lora_from:
+            # Load existing LoRA checkpoint for stage-2 training
+            print(f"Loading existing LoRA weights from {load_lora_from} for stage-2 training...")
             from peft import PeftModel
-            model = PeftModel.from_pretrained(model, resume_from)
-            print("LoRA checkpoint loaded successfully")
+            model = PeftModel.from_pretrained(model, load_lora_from)
+            print("LoRA weights loaded successfully. Starting new training phase with these weights.")
         else:
             # Create new LoRA configuration
-            print("Configuring LoRA...")
+            print("Configuring new LoRA...")
             lora_config = LoraConfig(
                 r=config.get('lora_r', 64),
                 lora_alpha=config.get('lora_alpha', 32),
@@ -169,13 +169,14 @@ def setup_training_args(config: Dict) -> TrainingArguments:
     return training_args
 
 
-def train_stage1(config_path: str, resume_from: Optional[str] = None):
+def train_stage1(config_path: str, load_lora_from: Optional[str] = None):
     """
     Main training function.
     
     Args:
         config_path: Path to configuration YAML file
-        resume_from: Path to LoRA checkpoint directory to resume from (optional)
+        load_lora_from: Path to existing LoRA checkpoint for stage-2 training (optional)
+                       Note: This loads LoRA weights but starts a NEW training (not resume)
     """
     # Load config
     config = load_config(config_path)
@@ -192,7 +193,7 @@ def train_stage1(config_path: str, resume_from: Optional[str] = None):
         )
     
     # Setup model and tokenizer
-    model, tokenizer = setup_model_and_tokenizer(config, resume_from=resume_from)
+    model, tokenizer = setup_model_and_tokenizer(config, load_lora_from=load_lora_from)
     
     # Setup training arguments
     training_args = setup_training_args(config)
@@ -228,17 +229,16 @@ def train_stage1(config_path: str, resume_from: Optional[str] = None):
     
     # Train
     print("\n" + "=" * 60)
-    if resume_from:
-        print(f"Resuming training from checkpoint: {resume_from}")
+    if load_lora_from:
+        print(f"Starting stage-2 training with LoRA weights from: {load_lora_from}")
+        print("Note: This is a NEW training phase, not resuming from checkpoint")
     else:
-        print("Starting training...")
+        print("Starting stage-1 training with new LoRA initialization...")
     print("=" * 60)
     
-    # Resume from checkpoint if provided
-    # Note: resume_from is for LoRA weights, but Trainer.train() can also
-    # resume from a full training checkpoint (optimizer state, etc.)
-    # If you have a full checkpoint path in output_dir, Trainer will auto-detect it
-    trainer.train(resume_from_checkpoint=resume_from if resume_from and os.path.isdir(resume_from) else None)
+    # Start new training (even if loading existing LoRA weights)
+    # For true checkpoint resume, use Trainer's auto-detection in output_dir
+    trainer.train()
     
     # Save final model
     print("\nSaving final model...")
@@ -263,12 +263,12 @@ if __name__ == '__main__':
         help='Path to config YAML file'
     )
     parser.add_argument(
-        '--resume_from',
+        '--load_lora_from',
         type=str,
         default=None,
-        help='Path to LoRA checkpoint directory to resume training from'
+        help='Path to existing LoRA checkpoint for stage-2 training'
     )
     
     args = parser.parse_args()
     
-    train_stage1(args.config, resume_from=args.resume_from)
+    train_stage1(args.config, load_lora_from=args.load_lora_from)
