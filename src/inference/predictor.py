@@ -34,18 +34,17 @@ def parse_virtual_token(token: str) -> Dict[str, str]:
     
     # 按下划线分割
     parts = token_content.split('_')
+
+    tool_name = parts[0:-5]
     
-    # 虚拟token应该有6个部分：TOOL, SIZE, CPU, CPUMEM, GPU, GPUMEM
-    if len(parts) != 6:
-        return {}
     
     return {
-        'tool': parts[0],
-        'size': parts[1],
-        'cpu_core': parts[2],
-        'cpu_mem': parts[3],
-        'gpu_sm': parts[4],
-        'gpu_mem': parts[5]
+        'tool': '_'.join(tool_name),
+        'size': parts[-5],
+        'cpu_core': parts[-4],
+        'cpu_mem': parts[-3],
+        'gpu_sm': parts[-2],
+        'gpu_mem': parts[-1]
     }
 
 
