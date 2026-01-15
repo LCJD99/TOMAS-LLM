@@ -25,16 +25,17 @@ def initialize_embeddings(
     registry: dict,
     output_dir: str,
     device: str = 'cuda',
-    semantic_ratio: int = 1
+    semantic_ratio: float = 1.0
 ):
     """
     初始化虚拟 Token 的 Embedding
     
     Args:
         semantic_ratio: 语义部分占比，比例为 semantic_ratio / (semantic_ratio + 1)
-                       例如 semantic_ratio=1 表示 1/2 语义 + 1/2 差异
-                            semantic_ratio=2 表示 2/3 语义 + 1/3 差异
-                            semantic_ratio=3 表示 3/4 语义 + 1/4 差异
+                       例如 semantic_ratio=1.0 表示 1/2 语义 + 1/2 差异
+                            semantic_ratio=2.0 表示 2/3 语义 + 1/3 差异
+                            semantic_ratio=0.5 表示 1/3 语义 + 2/3 差异（差异更大）
+                            semantic_ratio=0.2 表示 ~17% 语义 + ~83% 差异（差异更大）
     """
     
     print(f"加载基础模型: {base_model_name}")
@@ -76,7 +77,8 @@ def initialize_embeddings(
     # 获取 hidden size 并根据比例分配
     hidden_size = input_embeddings.weight.shape[1]
     total_ratio = semantic_ratio + 1
-    semantic_size = (hidden_size * semantic_ratio) // total_ratio
+    # 确保维度为整数
+    semantic_size = int((hidden_size * semantic_ratio) / total_ratio)
     difference_size = hidden_size - semantic_size
     
     print(f"Hidden size: {hidden_size}")
@@ -218,10 +220,11 @@ def main():
     )
     parser.add_argument(
         '--semantic_ratio',
-        type=int,
-        default=1,
+        type=float,
+        default=1.0,
         help='语义部分占比分子，比例为 semantic_ratio/(semantic_ratio+1)。'
-             '例如：1表示1/2语义+1/2差异，2表示2/3语义+1/3差异，3表示3/4语义+1/4差异'
+             '例如：1.0表示1/2语义+1/2差异，2.0表示2/3语义+1/3差异，'
+             '0.5表示1/3语义+2/3差异（差异更大），0.2表示~17%%语义+~83%%差异'
     )
     parser.add_argument(
         '--verify',

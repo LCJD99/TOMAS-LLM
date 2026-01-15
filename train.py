@@ -9,6 +9,12 @@ if __name__ == '__main__':
         required=True,
         help='Path to config YAML file'
     )
+    parser.add_argument(
+        '--resume_from',
+        type=str,
+        default=None,
+        help='Path to LoRA checkpoint directory to resume training from'
+    )
     
     args = parser.parse_args()
-    train_stage1(args.config)
+    train_stage1(args.config, resume_from=args.resume_from)

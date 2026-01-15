@@ -31,12 +31,13 @@ def load_config(config_path: str) -> Dict:
     return config
 
 
-def setup_model_and_tokenizer(config: Dict):
+def setup_model_and_tokenizer(config: Dict, resume_from: Optional[str] = None):
     """
     Load and configure model with LoRA and trainable embeddings.
     
     Args:
         config: Configuration dictionary
+        resume_from: Path to LoRA checkpoint directory to resume from (optional)
     
     Returns:
         Tuple of (model, tokenizer)
@@ -57,17 +58,26 @@ def setup_model_and_tokenizer(config: Dict):
     
     # Configure LoRA
     if config.get('use_lora', True):
-        print("Configuring LoRA...")
-        lora_config = LoraConfig(
-            r=config.get('lora_r', 64),
-            lora_alpha=config.get('lora_alpha', 32),
-            target_modules=config.get('lora_target_modules', ['q_proj', 'v_proj', 'k_proj', 'o_proj']),
-            lora_dropout=config.get('lora_dropout', 0.1),
-            bias="none",
-            task_type=TaskType.CAUSAL_LM
-        )
+        if resume_from:
+            # Load existing LoRA checkpoint
+            print(f"Loading LoRA checkpoint from {resume_from}...")
+            from peft import PeftModel
+            model = PeftModel.from_pretrained(model, resume_from)
+            print("LoRA checkpoint loaded successfully")
+        else:
+            # Create new LoRA configuration
+            print("Configuring LoRA...")
+            lora_config = LoraConfig(
+                r=config.get('lora_r', 64),
+                lora_alpha=config.get('lora_alpha', 32),
+                target_modules=config.get('lora_target_modules', ['q_proj', 'v_proj', 'k_proj', 'o_proj']),
+                lora_dropout=config.get('lora_dropout', 0.1),
+                bias="none",
+                task_type=TaskType.CAUSAL_LM
+            )
+            
+            model = get_peft_model(model, lora_config)
         
-        model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
     
     # Enable gradient checkpointing for memory efficiency
@@ -159,12 +169,13 @@ def setup_training_args(config: Dict) -> TrainingArguments:
     return training_args
 
 
-def train_stage1(config_path: str):
+def train_stage1(config_path: str, resume_from: Optional[str] = None):
     """
     Main training function.
     
     Args:
         config_path: Path to configuration YAML file
+        resume_from: Path to LoRA checkpoint directory to resume from (optional)
     """
     # Load config
     config = load_config(config_path)
@@ -181,7 +192,7 @@ def train_stage1(config_path: str):
         )
     
     # Setup model and tokenizer
-    model, tokenizer = setup_model_and_tokenizer(config)
+    model, tokenizer = setup_model_and_tokenizer(config, resume_from=resume_from)
     
     # Setup training arguments
     training_args = setup_training_args(config)
@@ -217,10 +228,17 @@ def train_stage1(config_path: str):
     
     # Train
     print("\n" + "=" * 60)
-    print("Starting training...")
+    if resume_from:
+        print(f"Resuming training from checkpoint: {resume_from}")
+    else:
+        print("Starting training...")
     print("=" * 60)
     
-    trainer.train()
+    # Resume from checkpoint if provided
+    # Note: resume_from is for LoRA weights, but Trainer.train() can also
+    # resume from a full training checkpoint (optimizer state, etc.)
+    # If you have a full checkpoint path in output_dir, Trainer will auto-detect it
+    trainer.train(resume_from_checkpoint=resume_from if resume_from and os.path.isdir(resume_from) else None)
     
     # Save final model
     print("\nSaving final model...")
@@ -244,7 +262,13 @@ if __name__ == '__main__':
         required=True,
         help='Path to config YAML file'
     )
+    parser.add_argument(
+        '--resume_from',
+        type=str,
+        default=None,
+        help='Path to LoRA checkpoint directory to resume training from'
+    )
     
     args = parser.parse_args()
     
-    train_stage1(args.config)
+    train_stage1(args.config, resume_from=args.resume_from)
