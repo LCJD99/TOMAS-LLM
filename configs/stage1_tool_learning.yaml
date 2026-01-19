@@ -19,6 +19,15 @@ warmup_ratio: 0.03
 weight_decay: 0.01
 max_grad_norm: 1.0
 
+# Dynamic Embedding Configuration
+use_real_profile_values: true  # 使用真实配置值（需要归一化）而非离散级别
+system_config_path: "data/raw/system.json"  # 系统最大配置文件，用于归一化
+profile_encoder_type: "simple"  # Profile Encoder 类型
+profile_encoder_hidden_dims: [128, 512]  # Hidden layers
+profile_encoder_activation: "gelu"
+profile_encoder_dropout: 0.0
+train_lm_head: true  # 是否训练原始 lm_head
+
 # LoRA Configuration
 use_lora: true
 lora_r: 128
