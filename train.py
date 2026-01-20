@@ -1,5 +1,6 @@
 from src.engine.stage1_trainer import train_stage1
 from src.engine.stage1_trainer_v2 import train_stage1_v2
+from src.engine.stage1_trainer_v3 import train_stage1_v3
 
 if __name__ == '__main__':
     import argparse
@@ -18,15 +19,20 @@ if __name__ == '__main__':
         help='Path to existing LoRA checkpoint directory to load for stage-2 training (not resume, starts new training with loaded LoRA weights)'
     )
     parser.add_argument(
-        '--use_v2',
-        action='store_true',
-        help='Use stage1_trainer_v2 with Dynamic Embeddings architecture (Profile Encoder + Dynamic LM Head)'
+        '--version',
+        type=str,
+        default='v1',
+        choices=['v1', 'v2', 'v3'],
+        help='Training version: v1=Standard, v2=Dynamic Embeddings, v3=Virtual Tokens (recommended)'
     )
     
     args = parser.parse_args()
     
-    # 选择训练版本
-    if args.use_v2:
+    # Select training version
+    if args.version == 'v3':
+        print("Using Stage 1 Trainer V3 (Virtual Tokens - No Embedding Expansion)")
+        train_stage1_v3(args.config, load_lora_from=args.load_lora_from)
+    elif args.version == 'v2':
         print("Using Stage 1 Trainer V2 (Dynamic Embeddings)")
         train_stage1_v2(args.config, load_lora_from=args.load_lora_from)
     else:
